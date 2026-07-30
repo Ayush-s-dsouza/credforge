@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.credforge/
+*.vault
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# tee'd terminal output from live runs, not a build deliverable
+*.txt
+
+# ad-hoc manual-exploration script, not a build deliverable
+scripts/scratch_run.py
+scratch_batch_output/
+
+# personal interview prep, not a submitted deliverable -- kept on a
+# local-only git branch, never pushed to the shared remote
+/STUDY.md
