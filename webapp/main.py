@@ -1,0 +1,314 @@
+"""FastAPI wrapper around credforge's existing pipeline orchestrator.
+
+No pipeline logic lives here -- this calls the exact same
+`pipeline.orchestrator.run_app()` the CLI's `run` command calls, streaming
+its ExplainSink events out over SSE instead of printing them to a
+terminal. Mock provisioning only (no Playwright in this image -- it can't
+complete a real signup from a datacenter IP anyway, and it's 400MB we
+don't want in a web image). See RUNBOOK_MANUAL.md / OPS.md for why.
+"""
+
+import asyncio
+import json
+import os
+import re
+import sys
+import time
+from collections import defaultdict, deque
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from credforge.config import Settings  # noqa: E402
+from credforge.pipeline.explain import ExplainEvent  # noqa: E402
+from credforge.pipeline.orchestrator import run_app  # noqa: E402
+from credforge.providers.factory import build_providers  # noqa: E402
+from credforge.providers.search import SearchProviderError  # noqa: E402
+from credforge.redaction import scrub_secrets  # noqa: E402
+from credforge.registry.store import AppendOnlyRegistry  # noqa: E402
+from credforge.run_context import new_run_id  # noqa: E402
+from credforge.vault.crypto_vault import FernetVault  # noqa: E402
+
+ACCESS_TOKEN = os.environ.get("WEB_ACCESS_TOKEN", "")
+RUN_CAP = int(os.environ.get("RUN_CAP", "100"))
+RATE_LIMIT_PER_MIN = int(os.environ.get("RATE_LIMIT_PER_MIN", "3"))
+EXAMPLES_DIR = REPO_ROOT / "examples"
+LIVE_RUN_CAP = int(os.environ.get("LIVE_RUN_CAP", "20"))
+
+# Recipe-backed vendors are a small, fixed, known set (signup_recipes.py) --
+# matched here by simple keyword against the raw user input, since the web
+# layer must pick a ProviderBundle *before* run_app's own RESOLVE stage runs
+# and resolves the real domain. No pipeline logic duplicated: this is only
+# "which of two pre-built provider bundles do we hand to the same run_app,"
+# never a second RESOLVE.
+_LIVE_RECIPE_KEYWORDS = {"nasa": "NASA API", "openweathermap": "OpenWeatherMap", "openweather": "OpenWeatherMap"}
+
+
+def _matches_live_recipe(app_name: str) -> str | None:
+    low = app_name.lower()
+    for kw, label in _LIVE_RECIPE_KEYWORDS.items():
+        if kw in low:
+            return label
+    return None
+
+
+settings = Settings()
+registry = AppendOnlyRegistry(settings.data_dir / "registry.jsonl")
+vault = (
+    FernetVault(key=settings.vault_key.get_secret_value(), path=settings.data_dir / "vault" / "secrets.vault")
+    if settings.vault_key
+    else None
+)
+
+providers_mock = build_providers(settings, live=False)
+_live_enabled = bool(settings.imap_host and settings.imap_user and settings.imap_password)
+providers_live = build_providers(settings, live=True) if _live_enabled else None
+
+COUNTER_PATH = settings.data_dir / "run_counter.json"
+LIVE_COUNTER_PATH = settings.data_dir / "live_run_counter.json"
+COUNTER_PATH.parent.mkdir(parents=True, exist_ok=True)
+_counter_lock = asyncio.Lock()
+_live_counter_lock = asyncio.Lock()
+
+
+def _read_json_counter(path: Path) -> int:
+    if path.exists():
+        try:
+            return int(json.loads(path.read_text(encoding="utf-8")).get("count", 0))
+        except Exception:
+            return 0
+    return 0
+
+
+def _write_json_counter(path: Path, n: int) -> None:
+    path.write_text(json.dumps({"count": n}), encoding="utf-8")
+
+
+# Per-IP rate limit -- in-memory, resets on restart, good enough for "a few
+# runs per minute" abuse prevention on a demo deployment.
+_ip_hits: dict[str, deque] = defaultdict(deque)
+
+
+def _check_rate_limit(ip: str) -> bool:
+    now = time.monotonic()
+    dq = _ip_hits[ip]
+    while dq and now - dq[0] > 60:
+        dq.popleft()
+    if len(dq) >= RATE_LIMIT_PER_MIN:
+        return False
+    dq.append(now)
+    return True
+
+
+# App name only -- letters/numbers/spaces/./- , explicitly no "://" or
+# scheme-looking input. The client can never hand this a fetch target.
+_APP_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .\-]{0,63}$")
+
+
+def _validate_app_name(raw: str) -> str:
+    name = (raw or "").strip()
+    if not name or not _APP_NAME_RE.match(name) or "://" in name.lower() or name.lower().startswith("http"):
+        raise HTTPException(400, "invalid app name -- letters/numbers/spaces/hyphens only, no URLs")
+    return name
+
+
+def _assert_no_raw_credential(artifact) -> None:
+    """Defense in depth on top of two structural guarantees: CredentialInfo's
+    schema only ever carries `*_ref` (vault refs) or `client_id` (public, not
+    secret) -- never a raw value (D-041) -- and scrub_secrets() already ran
+    on the serialized JSON. This asserts the schema guarantee actually holds
+    for THIS artifact before it ever reaches a response body."""
+    cred = artifact.credential
+    if cred is None:
+        return
+    for field_name in ("api_key_ref", "client_secret_ref", "bearer_token_ref", "account_password_ref"):
+        value = getattr(cred, field_name, None)
+        if value is not None and not str(value).startswith("vault://"):
+            raise RuntimeError(f"refusing to emit artifact: {field_name} is not a vault:// reference")
+
+
+def _check_token(k: str | None) -> None:
+    if ACCESS_TOKEN and k != ACCESS_TOKEN:
+        raise HTTPException(403, "invalid or missing access token")
+
+
+class SSEExplainSink:
+    """Same ExplainSink protocol the CLI's ConsoleExplainSink implements --
+    pushes onto an asyncio.Queue instead of printing, with elapsed_ms per
+    event so the browser can render a ticking counter per stage."""
+
+    def __init__(self, queue: asyncio.Queue, start: float) -> None:
+        self.queue = queue
+        self.start = start
+
+    def emit(self, event: ExplainEvent) -> None:
+        self.queue.put_nowait(
+            {
+                "type": "stage",
+                "stage": event.stage.value,
+                "identity_key": event.identity_key,
+                "message": scrub_secrets(event.message),
+                "elapsed_ms": int((time.monotonic() - self.start) * 1000),
+            }
+        )
+
+
+app = FastAPI(title="credforge")
+
+
+@app.get("/")
+def index() -> FileResponse:
+    return FileResponse(Path(__file__).parent / "static" / "index.html")
+
+
+@app.get("/api/status")
+def status() -> dict:
+    return {
+        "runs_used": _read_json_counter(COUNTER_PATH),
+        "run_cap": RUN_CAP,
+        "runs_remaining": max(0, RUN_CAP - _read_json_counter(COUNTER_PATH)),
+        "live_runs_used": _read_json_counter(LIVE_COUNTER_PATH),
+        "live_run_cap": LIVE_RUN_CAP,
+        "live_runs_remaining": max(0, LIVE_RUN_CAP - _read_json_counter(LIVE_COUNTER_PATH)),
+        "live_enabled": _live_enabled,
+        "live_recipe_vendors": sorted(set(_LIVE_RECIPE_KEYWORDS.values())),
+        "search_provider": "brave" if settings.brave_api_key else "ddg",
+    }
+
+
+@app.get("/api/examples")
+def examples() -> dict:
+    seed_batch = []
+    report = None
+    for f in sorted((EXAMPLES_DIR / "seed_batch").glob("*.json")):
+        data = json.loads(f.read_text(encoding="utf-8"))
+        if f.name == "report.json":
+            report = data
+        else:
+            seed_batch.append(data)
+    nasa_path = EXAMPLES_DIR / "nasa_live_credential.json"
+    hitl_path = EXAMPLES_DIR / "hitl_task_etsy.md"
+    return {
+        "seed_batch": seed_batch,
+        "report": report,
+        "nasa_live_credential": json.loads(nasa_path.read_text(encoding="utf-8")) if nasa_path.exists() else None,
+        "hitl_task_etsy": hitl_path.read_text(encoding="utf-8") if hitl_path.exists() else None,
+    }
+
+
+@app.post("/api/run")
+async def api_run(request: Request, k: str | None = Query(None)) -> StreamingResponse:
+    _check_token(k)
+    body = await request.json()
+    app_name = _validate_app_name(body.get("app_name", ""))
+
+    ip = request.headers.get("x-forwarded-for", (request.client.host if request.client else "unknown"))
+    ip = ip.split(",")[0].strip()
+    if not _check_rate_limit(ip):
+        raise HTTPException(429, "rate limit exceeded -- a few runs per minute per IP, try again shortly")
+
+    recipe_match = _matches_live_recipe(app_name)
+    use_live = bool(recipe_match and _live_enabled)
+
+    async with _counter_lock:
+        used = _read_json_counter(COUNTER_PATH)
+        if used >= RUN_CAP:
+            raise HTTPException(429, f"global run cap ({RUN_CAP}) reached for this deployment -- see the examples below")
+        _write_json_counter(COUNTER_PATH, used + 1)
+
+    if use_live:
+        async with _live_counter_lock:
+            live_used = _read_json_counter(LIVE_COUNTER_PATH)
+            if live_used >= LIVE_RUN_CAP:
+                raise HTTPException(
+                    429,
+                    f"live-provisioning cap ({LIVE_RUN_CAP}) reached for this deployment -- "
+                    "see the pre-computed NASA example instead",
+                )
+            _write_json_counter(LIVE_COUNTER_PATH, live_used + 1)
+
+    active_providers = providers_live if use_live else providers_mock
+
+    async def event_stream():
+        queue: asyncio.Queue = asyncio.Queue()
+        start = time.monotonic()
+        sink = SSEExplainSink(queue, start)
+        run_id = new_run_id()
+        queue.put_nowait(
+            {
+                "type": "mode",
+                "live": use_live,
+                "message": (
+                    f"LIVE provisioning -- recipe registered for {recipe_match}, real signup will be attempted"
+                    if use_live
+                    else (
+                        f"Mocked provisioning -- no signup recipe registered for this vendor"
+                        if not recipe_match
+                        else "Mocked provisioning -- live provisioning is disabled on this deployment"
+                    )
+                ),
+            }
+        )
+
+        async def runner() -> None:
+            try:
+                state, artifact = await run_app(
+                    app_name,
+                    providers=active_providers,
+                    settings=settings,
+                    registry=registry,
+                    run_id=run_id,
+                    data_dir=settings.data_dir,
+                    vault=vault,
+                    dry_run=False,
+                    live=use_live,
+                    explain=sink,
+                )
+                if artifact is None:
+                    # Every terminal outcome produces a real artifact (D-038/D-039) --
+                    # this branch is a defensive fallback, not the expected path.
+                    stopped_at = "DISCOVER" if state.discovery is not None else "RESOLVE"
+                    await queue.put({"type": "stopped", "stage": stopped_at})
+                else:
+                    # `evidence` entries shaped "candidate considered: <domain> (confidence <n>)"
+                    # are how resolve_ambiguous/resolve_low_confidence candidates surface --
+                    # the frontend parses these into clickable re-run cards.
+                    safe_json = scrub_secrets(artifact.model_dump_json())
+                    _assert_no_raw_credential(artifact)
+                    await queue.put({"type": "done", "artifact": json.loads(safe_json)})
+            except SearchProviderError:
+                await queue.put(
+                    {
+                        "type": "search_unavailable",
+                        "message": (
+                            "Search provider unavailable -- DuckDuckGo is unofficial and rate-limits "
+                            "datacenter IPs; this is exactly why search sits behind a provider protocol "
+                            "in this project. See the pre-computed examples below for real output."
+                        ),
+                    }
+                )
+            except Exception as exc:  # one run's crash never takes down the server
+                await queue.put({"type": "error", "message": scrub_secrets(f"{type(exc).__name__}: {exc}")})
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(runner())
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield f"data: {json.dumps(item)}\n\n"
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")

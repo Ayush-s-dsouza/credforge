@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>credforge</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 900px; margin: 0 auto; padding: 24px 16px 80px; line-height: 1.5; }
+  h1 { margin-bottom: 4px; }
+  .sub { opacity: 0.7; margin-top: 0; font-size: 0.95em; }
+  .badges { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 20px; }
+  .badge { border: 1px solid currentColor; border-radius: 999px; padding: 3px 10px; font-size: 0.82em; opacity: 0.85; }
+  section { margin: 28px 0; padding-top: 20px; border-top: 1px solid #8884; }
+  input[type=text] { font-size: 1em; padding: 8px 10px; width: 260px; border-radius: 6px; border: 1px solid #8888; }
+  button { font-size: 1em; padding: 8px 14px; border-radius: 6px; border: 1px solid #8888; cursor: pointer; background: #6366f122; }
+  button:hover { background: #6366f144; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .examples-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+  .examples-row button { background: transparent; }
+  #log { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.86em; background: #80808014; border-radius: 8px; padding: 12px; min-height: 40px; white-space: pre-wrap; }
+  .log-line { display: flex; gap: 10px; }
+  .log-line .stage { opacity: 0.6; min-width: 90px; }
+  .log-line .ms { opacity: 0.5; min-width: 60px; text-align: right; }
+  #elapsed { font-weight: 600; }
+  pre.artifact { background: #80808014; border-radius: 8px; padding: 12px; overflow-x: auto; font-size: 0.82em; }
+  .status-AUTO { color: #16a34a; font-weight: 700; }
+  .status-HITL { color: #d97706; font-weight: 700; }
+  .status-UNSUPPORTED { color: #6b7280; font-weight: 700; }
+  .card { border: 1px solid #8886; border-radius: 8px; padding: 10px 12px; margin: 6px 0; cursor: pointer; }
+  .card:hover { background: #6366f114; }
+  .card .conf { opacity: 0.65; font-size: 0.85em; }
+  .hitl-render { background: #80808014; border-radius: 8px; padding: 14px 16px; }
+  .warn { color: #d97706; }
+  select { font-size: 0.95em; padding: 6px; border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.9em; }
+  td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #8883; }
+</style>
+</head>
+<body>
+
+<h1>credforge</h1>
+<p class="sub">Automates the pre-work before a SaaS integration: find the vendor's real API docs,
+work out how it authenticates, check the ToS eligibility -- for real, not guessed -- and (mocked
+here; real under the CLI's <code>--live</code>) provision + validate a credential.</p>
+
+<div class="badges">
+  <span class="badge" id="badge-provider">search: --</span>
+  <span class="badge" id="badge-runs">runs: --</span>
+  <span class="badge" id="badge-live-runs">live runs: --</span>
+</div>
+
+<section id="sec-examples">
+  <h2>Pre-computed: real seed batch (20 apps, no search calls needed)</h2>
+  <p>Real DuckDuckGo search, real HTTP fetches, real <code>claude-sonnet-5</code> extraction,
+     from run <code id="report-run-id">...</code>.</p>
+  <table id="report-table"><tbody></tbody></table>
+  <p style="margin-top:14px;">View any app's real artifact:</p>
+  <select id="seed-select"></select>
+  <pre class="artifact" id="seed-artifact"></pre>
+
+  <p style="margin-top:18px;"><strong>The one real, live-provisioned + live-validated credential
+     this project produced</strong> (NASA API -- real signup, real emailed key, real API call back):</p>
+  <pre class="artifact" id="nasa-artifact"></pre>
+
+  <p style="margin-top:18px;"><strong>What a HITL result actually looks like</strong> (real Etsy artifact,
+     rendered the same way a live HITL result renders below):</p>
+  <div class="hitl-render" id="etsy-hitl"></div>
+</section>
+
+<section id="sec-run">
+  <h2>Run it live</h2>
+  <p>Real research every time. Provisioning is mocked <strong>unless</strong> the vendor has a
+     registered signup recipe -- the run log always states which mode was used, never silently.</p>
+  <div class="examples-row">
+    <span style="align-self:center;opacity:.7;font-size:.85em;">research + mocked credential:</span>
+    <button onclick="setApp('Notion')">Notion</button>
+    <button onclick="setApp('Stripe')">Stripe</button>
+    <button onclick="setApp('Linear')">Linear</button>
+    <button onclick="setApp('Postmark')">Postmark (obscure)</button>
+  </div>
+  <div class="examples-row" id="live-buttons-row">
+    <span style="align-self:center;opacity:.7;font-size:.85em;">real live credential attempt:</span>
+  </div>
+  <div>
+    <input type="text" id="app-input" placeholder="app name, e.g. Stripe">
+    <button id="run-btn" onclick="runApp()">Run</button>
+    <span id="elapsed"></span>
+  </div>
+  <div id="log" style="margin-top:14px; display:none;"></div>
+  <div id="candidates" style="margin-top:10px;"></div>
+  <pre class="artifact" id="run-artifact" style="display:none;"></pre>
+  <div class="hitl-render" id="run-hitl" style="display:none;"></div>
+</section>
+
+<script>
+const params = new URLSearchParams(window.location.search);
+const TOKEN = params.get('k') || '';
+
+function setApp(name) { document.getElementById('app-input').value = name; }
+
+async function loadStatus() {
+  const r = await fetch('/api/status');
+  const s = await r.json();
+  document.getElementById('badge-provider').textContent = 'search: ' + s.search_provider;
+  document.getElementById('badge-runs').textContent = `runs: ${s.runs_remaining} / ${s.run_cap} remaining`;
+  document.getElementById('badge-live-runs').textContent = s.live_enabled
+    ? `live runs: ${s.live_runs_remaining} / ${s.live_run_cap} remaining`
+    : 'live provisioning: disabled on this deployment';
+
+  const row = document.getElementById('live-buttons-row');
+  if (s.live_enabled && s.live_recipe_vendors && s.live_recipe_vendors.length) {
+    for (const v of s.live_recipe_vendors) {
+      const btn = document.createElement('button');
+      btn.textContent = v;
+      btn.onclick = () => setApp(v);
+      row.appendChild(btn);
+    }
+  } else {
+    const note = document.createElement('span');
+    note.style.opacity = '0.7';
+    note.style.fontSize = '.85em';
+    note.textContent = 'none available on this deployment';
+    row.appendChild(note);
+  }
+}
+
+function renderHitl(container, artifact) {
+  const ev = artifact.evidence || [];
+  const gaps = artifact.completeness_gaps || [];
+  let html = `<p><span class="status-${artifact.status}">${artifact.status}</span> / <code>${artifact.reason_code}</code></p>`;
+  if (ev.length) {
+    html += '<p><strong>Evidence found:</strong></p><ul>';
+    for (const e of ev) html += `<li>${escapeHtml(e.claim)}${e.source_url ? ' -- <a href="'+e.source_url+'" target="_blank" rel="noopener">'+e.source_url+'</a>' : ''}${e.snippet ? '<br><em>"'+escapeHtml(e.snippet)+'"</em>' : ''}</li>`;
+    html += '</ul>';
+  }
+  if (gaps.length) {
+    html += '<p><strong>Still missing:</strong> ' + gaps.map(g => g.field).join(', ') + '</p>';
+  }
+  container.innerHTML = html;
+  container.style.display = 'block';
+}
+
+function escapeHtml(s) { return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function loadExamples() {
+  const r = await fetch('/api/examples');
+  const data = await r.json();
+
+  if (data.report) {
+    document.getElementById('report-run-id').textContent = data.report.run_id;
+    const tbody = document.querySelector('#report-table tbody');
+    for (const [status, count] of Object.entries(data.report.status_counts || {})) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td class="status-${status}">${status}</td><td>${count}</td>`;
+      tbody.appendChild(tr);
+    }
+  }
+
+  const sel = document.getElementById('seed-select');
+  sel.innerHTML = '<option value="">-- choose an app --</option>';
+  (data.seed_batch || []).forEach((a, i) => {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = `${a.app.app_name} -- ${a.status} / ${a.reason_code}`;
+    sel.appendChild(opt);
+  });
+  sel.onchange = () => {
+    const art = data.seed_batch[sel.value];
+    document.getElementById('seed-artifact').textContent = art ? JSON.stringify(art, null, 2) : '';
+  };
+
+  if (data.nasa_live_credential) {
+    document.getElementById('nasa-artifact').textContent = JSON.stringify(data.nasa_live_credential, null, 2);
+  }
+  if (data.hitl_task_etsy) {
+    document.getElementById('etsy-hitl').innerHTML = '<pre style="white-space:pre-wrap;">' + escapeHtml(data.hitl_task_etsy) + '</pre>';
+  }
+}
+
+function parseCandidates(evidence) {
+  const re = /^candidate considered: (\S+) \(confidence ([\d.]+)\)$/;
+  return (evidence || []).map(e => {
+    const m = re.exec(e.claim || '');
+    return m ? { domain: m[1], confidence: parseFloat(m[2]), snippet: e.snippet, source_url: e.source_url } : null;
+  }).filter(Boolean);
+}
+
+let running = false;
+async function runApp() {
+  if (running) return;
+  const appName = document.getElementById('app-input').value.trim();
+  if (!appName) return;
+  running = true;
+  const btn = document.getElementById('run-btn');
+  btn.disabled = true;
+  const log = document.getElementById('log');
+  log.style.display = 'block';
+  log.textContent = '';
+  document.getElementById('run-artifact').style.display = 'none';
+  document.getElementById('run-hitl').style.display = 'none';
+  document.getElementById('candidates').innerHTML = '';
+
+  const startedAt = Date.now();
+  const elapsedEl = document.getElementById('elapsed');
+  const ticker = setInterval(() => {
+    elapsedEl.textContent = ((Date.now() - startedAt) / 1000).toFixed(1) + 's';
+  }, 100);
+
+  function appendLine(html) {
+    const div = document.createElement('div');
+    div.className = 'log-line';
+    div.innerHTML = html;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  try {
+    const resp = await fetch(`/api/run?k=${encodeURIComponent(TOKEN)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app_name: appName }),
+    });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      appendLine(`<span class="warn">error ${resp.status}: ${escapeHtml(body.detail || resp.statusText)}</span>`);
+      return;
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const evt = JSON.parse(line.slice(6));
+        if (evt.type === 'mode') {
+          appendLine(`<strong style="${evt.live ? 'color:#dc2626' : 'opacity:.75'}">${evt.live ? 'LIVE' : 'MOCKED'}</strong> -- ${escapeHtml(evt.message)}`);
+        } else if (evt.type === 'stage') {
+          appendLine(`<span class="stage">[${evt.stage}]</span> ${escapeHtml(evt.identity_key)}: ${escapeHtml(evt.message)} <span class="ms">${evt.elapsed_ms}ms</span>`);
+        } else if (evt.type === 'search_unavailable') {
+          appendLine(`<span class="warn">${escapeHtml(evt.message)}</span>`);
+        } else if (evt.type === 'error') {
+          appendLine(`<span class="warn">error: ${escapeHtml(evt.message)}</span>`);
+        } else if (evt.type === 'stopped') {
+          appendLine(`<span class="warn">stopped before completing (${escapeHtml(evt.stage)})</span>`);
+        } else if (evt.type === 'done') {
+          const art = evt.artifact;
+          appendLine(`<strong class="status-${art.status}">${art.status}</strong> / ${art.reason_code}`);
+          document.getElementById('run-artifact').textContent = JSON.stringify(art, null, 2);
+          document.getElementById('run-artifact').style.display = 'block';
+          if (art.status === 'HITL') renderHitl(document.getElementById('run-hitl'), art);
+          const candidates = parseCandidates(art.evidence);
+          if (candidates.length) {
+            const box = document.getElementById('candidates');
+            box.innerHTML = '<p><strong>Candidates found -- click one to re-run with that exact domain:</strong></p>';
+            for (const c of candidates) {
+              const div = document.createElement('div');
+              div.className = 'card';
+              div.innerHTML = `<strong>${c.domain}</strong> <span class="conf">confidence ${c.confidence}</span><br><em>${escapeHtml(c.snippet || '')}</em>`;
+              div.onclick = () => { setApp(c.domain); runApp(); };
+              box.appendChild(div);
+            }
+            box.innerHTML += '<p style="opacity:.7;font-size:.85em;">UI-level workaround: the pipeline halts on ambiguity rather than guessing; a proper implementation would resume from the chosen candidate instead of re-running RESOLVE from scratch.</p>';
+          }
+        }
+      }
+    }
+  } catch (e) {
+    appendLine(`<span class="warn">connection error: ${escapeHtml(String(e))}</span>`);
+  } finally {
+    clearInterval(ticker);
+    btn.disabled = false;
+    running = false;
+    loadStatus();
+  }
+}
+
+loadStatus();
+loadExamples();
+</script>
+</body>
+</html>

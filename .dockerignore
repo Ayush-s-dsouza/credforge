@@ -1,0 +1,11 @@
+.git
+.venv
+.env
+.credforge
+.pytest_cache
+__pycache__
+*.pyc
+tests
+scratch_batch_output
+scripts/scratch_run.py
+*.txt
