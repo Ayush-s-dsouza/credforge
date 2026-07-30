@@ -29,6 +29,9 @@ NASA_API = SignupRecipe(
     last_name_field_selector="#user_last_name",
     submit_selector="#api_umbrella_signup_form button[type='submit']",
     credential_type=CredentialType.API_KEY,
+    # The signup form and the real API docs live on the same page --
+    # confirmed by having actually navigated here for the live run.
+    docs_url="https://api.nasa.gov/",
     # api.nasa.gov runs on api_umbrella (the same open-source platform
     # behind api.data.gov generally); the embed widget's own example key
     # visible in the page config (`apiKey: 'jfr9uihqvncOuii7lda5bDlsvOIDePcKTLWlzLte'`)
@@ -76,6 +79,12 @@ OPENWEATHERMAP = SignupRecipe(
     checkbox_selectors=["#agreement_is_age_confirmed", "#agreement_is_accepted"],
     submit_selector="input[name='commit']",
     credential_type=CredentialType.API_KEY,
+    # The real API reference -- distinct from the signup form above, and
+    # from the narrower _DOCS_PATH_GUESSES ("/docs", "/developers") in
+    # resolve.py, which don't include "/api" and so never find this on
+    # their own (a real, separate gap noted in OPS.md). Reverified live
+    # (200, current) before being hardcoded here.
+    docs_url="https://openweathermap.org/api",
     # Never reached live -- signup itself is blocked by the reCAPTCHA
     # before any email is ever sent. Left unset rather than guessed.
     api_key_email_regex=None,

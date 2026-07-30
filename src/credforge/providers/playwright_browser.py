@@ -52,6 +52,15 @@ class SignupRecipe(BaseModel):
     submit_selector: str
     credential_type: CredentialType
 
+    # The vendor's real, known developer-documentation URL -- not the
+    # signup form URL (those can differ; OpenWeatherMap's real docs live
+    # at openweathermap.org/api, its signup form at
+    # home.openweathermap.org/users/sign_up). A recipe only exists because
+    # someone already read this vendor's real page, so RESOLVE can pin
+    # straight to it instead of re-deriving it via search. See
+    # DECISIONS.md D-048.
+    docs_url: str
+
     # Person-identity fields some signup forms require (NASA does; many
     # OAuth app-registration forms don't ask at all).
     first_name_field_selector: str | None = None

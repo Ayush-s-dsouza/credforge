@@ -2200,3 +2200,133 @@ human-in-the-loop CAPTCHA-solving step (an operator solves it once,
 live, while `--headed` is set) -- OpenWeatherMap's recipe is otherwise
 ready for that; nothing about the field-mapping needs to change, only
 the CAPTCHA step itself.
+
+## Stage 9+ — Fixing RESOLVE's real live-provisioning gap
+
+### D-047: RESOLVE trusts a bare registrable domain as input directly, skipping candidate scoring entirely
+
+**Decided:** if the (validated, stripped) input already parses as a bare
+registrable domain -- "nasa.gov", "github.com": a real public suffix, no
+scheme, no path, no subdomain (`utils/domains.py::parse_bare_domain()`,
+built on tldextract's real public-suffix snapshot, not a naive "has a
+dot" regex) -- `resolve()` trusts it directly at confidence 1.0 and skips
+the "`<app> official website`" identification search entirely. Docs-URL
+discovery still runs for real afterward (a bare domain says nothing about
+where its own docs live); only the *identity* half of RESOLVE is skipped.
+
+**Found live, reconfirmed after the fact:** passing `nasa.gov` itself
+into `resolve()` still went through the generic scoring path and could in
+principle be out-scored or misranked by an unrelated same-label
+candidate -- searching for the identity of a vendor whose domain was
+just handed to you is answering a question already answered. This
+wasn't a crash or a wrong-domain bug in isolation; it was pure wasted
+search calls and needless risk for input that was never ambiguous to
+begin with.
+
+**Rejected: trusting any input containing a dot.** A naive `"." in text`
+check would wrongly accept "3.14" or "v2.1" as domains (no real public
+suffix backs either). `parse_bare_domain()` uses tldextract's actual
+public-suffix list, so only a string that really is `label.suffix` (or
+`label.co.uk`-shaped multi-part suffixes) qualifies -- verified directly:
+`parse_bare_domain("3.14")` is `None`.
+
+**Rejected: trusting a subdomain the same way** (`api.nasa.gov`).
+`parse_bare_domain()` explicitly requires `parts.subdomain` to be empty.
+A subdomain wasn't handed to us as "the vendor's identity" the way a bare
+registrable domain was -- it could be a CDN, a regional mirror, or
+anything else, and trusting it blindly would reintroduce exactly the
+kind of unverified guessing this whole stage exists to avoid.
+
+**Guard, tested directly:** this must never weaken real ambiguity
+detection for input that *isn't* already a domain.
+`test_bare_domain_trust_does_not_weaken_ambiguity_a_real_company_name_still_halts`
+runs "Sage" (a real company name, several real Sage-brand product domains
+genuinely close in score) through the unchanged normal path and asserts
+it still halts on `RESOLVE_AMBIGUOUS` -- `parse_bare_domain("Sage")` is
+`None` (no recognized suffix at all), so this path is structurally
+unreachable for non-domain-shaped input, not just empirically unreached.
+
+**Revisit if:** a real vendor's canonical identity is better expressed as
+a subdomain than a bare domain (unlikely, but worth naming) -- would need
+a deliberate, separate decision to trust subdomains too, not a silent
+widening of this one.
+
+### D-048: A registered SignupRecipe pins RESOLVE's identity (domain + docs URL) -- never its GATE verdict
+
+**Decided:** `resolve()` checks `LIVE_SIGNUP_RECIPES` (lazily imported,
+see below) before anything else. If the input names a vendor with a
+registered recipe -- exact domain match, or the domain's own label
+appearing in the slugified input ("NASA API" -> "nasa-api" contains
+"nasa", the label of "nasa.gov") -- RESOLVE pins straight to that
+recipe's known `domain` and `docs_url` at confidence 1.0, with zero
+search or fetch calls at all. A recipe only exists because someone
+already read that vendor's real signup page *and* its real docs page
+(D-042) to build it; re-deriving an already-known fact via search is
+pure waste, and for NASA specifically, actively harmful (see below).
+
+**The concrete bug this fixes:** even passing the literal string
+`"nasa.gov"` through the *old* RESOLVE, the docs-URL discovery step (a
+real search, not the identity search D-047 also skips) reliably landed
+on `sti.nasa.gov` (NASA's scientific/technical information server, a real
+but wrong page) instead of `api.nasa.gov` -- confirmed live, twice, both
+before and after D-047 landed. `api.nasa.gov` never won the generic
+"developer API documentation" search ranking against a domain this
+broad. `SignupRecipe.docs_url` is a new required field precisely to
+short-circuit past this: NASA's recipe states the answer is
+`https://api.nasa.gov/` because that's the page the recipe's own
+selectors were captured from -- it isn't a guess to verify, it's a fact
+already on hand. Same reasoning fixed a second, independent, previously
+undiscovered gap: OpenWeatherMap's real API docs live at
+`https://openweathermap.org/api`, a path RESOLVE's own
+`_DOCS_PATH_GUESSES` (`"/docs"`, `"/developers"`) has never included and
+so could never have found on its own (noted as an open gap in OPS.md
+before this fix; reverified live -- HTTP 200 -- before being hardcoded).
+
+**Critical constraint, and the actual design point worth writing down:**
+this pins IDENTITY ONLY. `resolve()` returns exactly the same
+`ResolveResult` shape any other path returns -- DISCOVER, CLASSIFY, and
+GATE run against the pinned `docs_url` exactly as they would against any
+other candidate's, with no awareness that identity was pinned rather
+than derived, and GATE's own verdict is the only thing that decides
+AUTO/HITL/UNSUPPORTED. A recipe knowing "this is definitely nasa.gov" is
+a completely different claim from "this vendor is definitely safe to
+automate" -- the first is a fact about naming, the second is a policy
+judgment only GATE is positioned to make, on real evidence, every time.
+Conflating the two would let a recipe silently force AUTO, which is
+precisely the false-`AUTO` failure mode D-035 already exists to prevent
+one layer up. Proven, not just asserted:
+`test_recipe_pinned_identity_can_still_land_hitl_gate_verdict_remains_binding`
+(`tests/pipeline/test_orchestrator.py`) pins a fake recipe's identity at
+confidence 1.0 and drives a real `TosGateExtraction` signal through the
+real `gate()`, and asserts the final artifact is `HITL` /
+`tos_prohibits_automation`, never `AUTO` -- through the actual
+orchestrator, not a hand-built shortcut.
+
+**Rejected: matching purely on exact domain, no name variant.** Would
+miss the more common real input shape (a vendor's name, "NASA API," not
+its domain) entirely, defeating half the point -- a user who already
+knows to type `nasa.gov` gets D-047's bare-domain trust regardless; D-048
+exists specifically to also cover the name a person would actually type.
+
+**Rejected: a second, separate hand-maintained registry mapping names to
+(domain, docs_url) pairs.** `LIVE_SIGNUP_RECIPES` already is that
+registry; adding a parallel one keyed differently is exactly the kind of
+two-sources-of-truth drift risk this project avoids everywhere else
+(the same reasoning as reusing `LIVE_SIGNUP_RECIPES` directly in
+`webapp/main.py` instead of the ad hoc keyword dict it used before this
+fix -- one registry, matched the same way, wherever the question "does
+this vendor have a recipe" is asked).
+
+**On the lazy import:** `signup_recipes.py` itself has no forced
+dependency on the `live` extra (`playwright` is only ever imported inside
+a method body, never at module load), so importing it from `resolve.py`
+doesn't newly require Playwright on a default install. The import is
+still kept local to `_match_recipe_identity()`, not hoisted to module
+level, so that guarantee stays visible at the one call site that
+actually needs it, rather than true only by accident of how
+`signup_recipes.py` happens to be written today.
+
+**Revisit if:** the recipe-backed vendor set grows past a size where
+label-substring matching starts producing false positives on unrelated
+app names -- worth switching to an explicit alias list per recipe at that
+point, not a larger blocklist bolted onto the substring check.

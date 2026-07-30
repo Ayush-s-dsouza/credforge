@@ -198,6 +198,74 @@ async def test_hitl_app_never_reaches_provision(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_recipe_pinned_identity_can_still_land_hitl_gate_verdict_remains_binding(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # D-048's critical constraint, proven end to end through the real
+    # orchestrator (not just unit-tested inside resolve.py in isolation):
+    # a registered SignupRecipe pins RESOLVE's domain+docs_url at
+    # confidence 1.0, but DISCOVER/CLASSIFY/GATE still run for real and
+    # GATE's own verdict is still fully binding -- a recipe must never be
+    # able to force AUTO.
+    import credforge.providers.signup_recipes as signup_recipes_module
+    from credforge.enums import CredentialType
+    from credforge.providers.playwright_browser import SignupRecipe
+
+    monkeypatch.setattr(
+        signup_recipes_module,
+        "LIVE_SIGNUP_RECIPES",
+        {
+            "pinnedvendor.com": SignupRecipe(
+                email_field_selector="#email",
+                submit_selector="#submit",
+                credential_type=CredentialType.API_KEY,
+                docs_url="https://pinnedvendor.com/docs",
+            )
+        },
+    )
+
+    class ProhibitsAutomationExtractor(FakeExtractor):
+        async def extract_tos_gate_signals(self, *, tos_text: str, tos_url: str) -> TosGateExtraction:
+            return TosGateExtraction(
+                prohibits_automation=True, requires_payment=False, requires_business_verification=False,
+                requires_sales_contact=False, requires_phone_verification=False, requires_captcha=False,
+                requires_sso_only=False,
+            )
+
+    fetch = FakeFetch(
+        {
+            "https://pinnedvendor.com/docs": LONG_TEXT,
+            "https://pinnedvendor.com/terms": LONG_TEXT,
+        }
+    )
+    providers = ProviderBundle(
+        search=FakeSearch([]),  # never called if pinning short-circuits correctly
+        fetch=fetch, extractor=ProhibitsAutomationExtractor(),
+        email=MockEmailProvider(), browser=MockBrowserDriver(),
+    )
+    registry = AppendOnlyRegistry(tmp_path / "registry.jsonl")
+
+    state, artifact = await run_app(
+        "PinnedVendor", providers=providers, settings=Settings(), registry=registry,
+        run_id="run_1", data_dir=tmp_path, dry_run=True,
+    )
+
+    # Identity really was pinned, not independently re-derived.
+    assert state.resolve.resolved is True
+    assert state.resolve.chosen.domain == "pinnedvendor.com"
+    assert state.resolve.chosen.confidence == 1.0
+    assert state.resolve.chosen.docs_url == "https://pinnedvendor.com/docs"
+
+    # But GATE's real, independent verdict is what the artifact reflects --
+    # not AUTO just because RESOLVE was confident.
+    assert artifact is not None
+    assert artifact.status.value == "HITL"
+    assert artifact.reason_code.value == "tos_prohibits_automation"
+    assert artifact.credential is None
+    assert state.provision is None
+
+
+@pytest.mark.asyncio
 async def test_a_batch_of_n_apps_always_produces_n_artifacts(tmp_path: Path) -> None:
     # The property the user asked to have tested directly: no app is ever
     # absent from batch output, regardless of which stage it fails at.

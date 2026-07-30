@@ -8,7 +8,19 @@ Pre-computed, real output -- no search calls needed to view these.
   Copied byte-for-byte from `.credforge/runs/.../artifacts/`; every
   credential-shaped field in every file is either `null` or a `vault://`
   reference, verified with a grep pass before this directory was
-  committed -- never a raw secret.
+  committed -- never a raw secret. **Provenance note, stated plainly:**
+  README.md's "Measured coverage" section now cites a *later* real run
+  (`run_20260730T170035Z_4a8d3af4`) than this directory's files -- kept
+  as-is rather than re-copied, because OPS.md's "Run-to-run coverage
+  volatility" section documents that the per-app breakdown genuinely
+  differs run to run for reasons unrelated to which run happens to be
+  cited here (real DDG/LLM non-determinism, proven by running the batch
+  twice). This directory is real, verified output from a real run -- just
+  not the *same* run the current README prose quotes numbers from. Etsy's
+  artifact here (`tos_prohibits_automation`, the source for
+  `hitl_task_etsy.md` below) is one specific, real, evidence-backed result
+  this exact app has produced -- not the *only* result it has produced
+  across repeated runs.
 
 - **`nasa_live_credential.json`** -- the one real, live-provisioned and
   live-validated credential this project produced (see DECISIONS.md and

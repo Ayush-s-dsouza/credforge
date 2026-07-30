@@ -238,24 +238,28 @@ again):
 ## Cost and scale
 
 Measured from two real sources: the 20-app seed batch
-(`run_20260730T023149Z_37a0e4fe`, via `credforge batch data/seed_apps.csv`,
+(`run_20260730T170035Z_4a8d3af4`, via `credforge batch data/seed_apps.csv`,
 mocked provisioning, real search/fetch/LLM) and one separately-instrumented
 real GitHub run (`pipeline/orchestrator.py::run_app`, `AnthropicExtractor`'s
 per-call `usage` recorded directly from the Anthropic response — see
 `providers/anthropic_extractor.py`'s `self.calls`).
 
 **Wall clock, real and measured (20 of 20 seed apps -- every app in this
-run has both a `resolved_at` and an `emitted_at` provenance timestamp,
-including the 2 that stopped at RESOLVE):** 758.0 seconds total span,
-individual per-app durations (`resolved_at` to `emitted_at`, i.e.
-processing-start to artifact-written) ranging from 6.7s (Twitter,
-`resolve_ambiguous` -- fails fast, stops before DISCOVER/CLASSIFY/GATE
-ever run) to 57.4s (Etsy), averaging **37.9 seconds/app**. This is
-sequential -- one app at a time, no concurrency in the current `batch`
-command. Every app in this run has a real duration; D-038/D-039 (every
-terminal outcome produces a real artifact with real `provenance`) is what
-makes that true -- an earlier run left 3 apps with no artifact and no
-timestamp at all, which is the gap those fixes closed.
+run has both a `resolved_at` and an `emitted_at` provenance timestamp):**
+707.3 seconds total span, individual per-app durations (`resolved_at` to
+`emitted_at`, i.e. processing-start to artifact-written) ranging from
+2.1s (Discord, `resolve_not_found` -- fails almost instantly, stops
+before DISCOVER/CLASSIFY/GATE ever run) to 83.8s (GitHub, the one AUTO
+app that ran the full DISCOVER+CLASSIFY+GATE ToS-check path), averaging
+**35.4 seconds/app**. This is sequential -- one app at a time, no
+concurrency in the current `batch` command. Every app in this run has a
+real duration; D-038/D-039 (every terminal outcome produces a real
+artifact with real `provenance`) is what makes that true.
+
+**These numbers moved from the previously measured run (43.2s -> 37.9s ->
+35.4s/app average across three real runs of the same code) -- see "Run-to-
+run coverage volatility" below before treating the per-app breakdown, or
+even this average, as a stable measurement rather than one sample.**
 
 **LLM calls and tokens, real and measured for one app (GitHub, full AUTO
 path -- DISCOVER, CLASSIFY, and GATE's ToS check all ran):**
@@ -297,24 +301,89 @@ speculation:**
   (10%)** -- a bare "no results" and a backend timeout, neither retried
   today since `ddg_search.py`'s retry logic is scoped only to
   `RatelimitException`. The canonical seed batch this section otherwise
-  cites (`run_20260730T023149Z_37a0e4fe`) hit zero `SearchProviderError`
-  failures -- both are real, single-run samples of an unpredictable,
-  no-key backend, not a stable rate. Extrapolated at the earlier run's
-  10% rate, 100 apps
+  cites (`run_20260730T170035Z_4a8d3af4`) hit zero `SearchProviderError`
+  failures this specific run -- both are real, single-run samples of an
+  unpredictable, no-key backend, not a stable rate. Extrapolated at the
+  earlier run's 10% rate, 100 apps
   means roughly 10 outright search failures with zero retry attempted --
   before LLM cost (~$2.56 at 100 apps, intro pricing) or wall clock
-  (~63 minutes sequential at the measured 37.9s/app average) become the
+  (~59 minutes sequential at the measured 35.4s/app average) become the
   practical constraint.
 - **At 1,000 apps:** wall clock becomes the harder constraint --
-  ~10.5 hours sequential at the same per-app average, which is the concrete
+  ~9.8 hours sequential at the same per-app average, which is the concrete
   number that makes `batch`'s current lack of concurrency (D-036's
   scoped-down Stage 9 cut) the thing to fix first, not LLM cost (~$25.60
   at 1,000 apps, intro pricing -- genuinely cheap at this scale) or the
   local vault/registry (plain JSONL/file I/O, no real ceiling at this
   volume). DDG's reliability problem doesn't go away at this scale either,
-  but by 1,000 apps it's competing with a 12-hour sequential run as the
+  but by 1,000 apps it's competing with a ~10-hour sequential run as the
   more visible problem, which is exactly the "real concurrency budget
   decision" this document has flagged as deferred work since Stage 4.
+
+## Run-to-run coverage volatility (found investigating the RESOLVE fix below)
+
+**The seed batch's per-app coverage table is a single sample, and the
+sample varies more than this project's docs have previously admitted.**
+Investigating whether D-047/D-048 (RESOLVE fixes, see below) actually
+moved the seed-batch numbers required running the full 20-app batch
+twice, plus several isolated single-app re-runs, to tell a real fix
+effect apart from ordinary noise. The result: **10 of 20 seed apps landed
+on the identical status and reason code in both full batch runs; the
+other 10 didn't** -- and for apps whose `resolve()` code path is
+completely untouched by today's change (Discord, Etsy, Mailgun,
+Monday.com, Notion, Open-Meteo, Trello -- none are bare-domain-shaped
+input, none have a registered recipe), any difference between runs is
+necessarily DDG search-result drift or LLM-extraction variance, not
+credforge's own logic changing. Etsy alone produced three different
+reason codes across three separate real runs:
+`tos_prohibits_automation`, `resolve_not_found`, `tos_unverifiable`.
+
+**Concretely, this means "0 VENDOR_BLOCKED" in the current README table
+undercounts the real rate, provably.** Re-running Etsy,
+Open-Meteo, and OpenWeatherMap in isolation immediately surfaced real,
+evidence-quoted vendor blocks the batch run missed -- see the README's
+"Measured coverage" section for the specific quotes. This isn't a new
+problem this session introduced; it's a pre-existing characteristic of a
+no-key search provider plus LLM extraction that a single labeled run
+number has always silently hidden. Worth fixing properly (running N
+repeats per app and reporting a distribution, not a point estimate) as
+future work -- not attempted here because it would 20x the real wall-clock
+and API cost of every future coverage measurement, a real tradeoff, not
+an oversight.
+
+**Two specific, real findings surfaced by chasing this down, both a
+direct consequence of D-048's identity-pinning fix actually working:**
+
+1. **NASA API now resolves to the right domain (`api.nasa.gov`, not
+   `sti.nasa.gov`) and immediately hits a different, real limitation:
+   DISCOVER can't read a JavaScript-rendered page.** Fetching
+   `api.nasa.gov` directly (a plain HTTP GET, exactly what
+   `HttpxFetchProvider` does) returns a page whose actual API-key-signup
+   widget is client-side rendered -- the raw HTML contains only
+   `Loading signup form...` and a `<script>` config block, no real API
+   documentation prose. `PlaywrightBrowserDriver` (PROVISION only) is the
+   only component in this project that executes JavaScript. Result:
+   NASA now lands on `UNSUPPORTED`/`no_public_api` reproducibly (four
+   separate real runs, zero variance) -- correctly pointed at the right
+   page, still can't read what's really there. `--live` still works
+   for NASA (PROVISION renders the page for real, see below) -- this
+   gap is specific to DISCOVER's research path, not provisioning.
+2. **OpenWeatherMap's newly-pinned docs URL
+   (`openweathermap.org/api`) is reliable in isolation and unreliable
+   deep in a long batch.** Five separate isolated/short runs: five
+   successes, real evidence every time (`requires_payment` x2,
+   `requires_sales_contact` x2, `tos_unverifiable` x1 -- itself further
+   evidence of the volatility above). Both full 20-app batch runs:
+   `discovery_failed` on this exact URL, both times. Ruled out: the
+   per-domain rate limiter (`net/rate_limiter.py` keys strictly per
+   domain, no cross-domain state to exhaust) and "batch command
+   mechanics" generally (a batch CSV containing only OpenWeatherMap
+   succeeds). Not yet isolated: the actual mechanism by which being
+   deep in a long sequential run specifically affects this one fetch --
+   best current guess is `httpx`'s connection-pool behavior over many
+   sequential cross-domain requests, not confirmed. Logged here as a
+   real, reproducible-in-context gap rather than papered over as
+   one-off flakiness.
 
 ## What makes a vendor recipe-able: two real vendors, two real outcomes
 

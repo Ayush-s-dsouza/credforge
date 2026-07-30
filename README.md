@@ -17,7 +17,7 @@ it's what a downstream toolkit-generation agent consumes to actually
 build the integration, without needing to re-derive any of the research
 that went into it.
 
-## Measured coverage — real seed batch, `run_20260730T023149Z_37a0e4fe`
+## Measured coverage — real seed batch, `run_20260730T170035Z_4a8d3af4`
 
 **These are measured counts from one real run of `credforge batch
 data/seed_apps.csv` against the live internet — real DuckDuckGo search,
@@ -25,18 +25,24 @@ real HTTP fetches, real `claude-sonnet-5` extraction, mocked (non-`--live`)
 provisioning. Nothing below is projected or estimated; every count below
 is read directly from this run's 20 artifact files and `report.json`.**
 
+**Read this table with the volatility callout below it, not instead of
+it.** A second full batch run, same code, same seed list, produced
+materially different numbers for several apps for reasons that trace to
+the search provider and LLM extraction, not to credforge's own logic —
+see "What it gets wrong" for the full reproducibility investigation
+before treating any single number here as a stable measurement of vendor
+behavior.
+
 | status | count | share |
 |---|---|---|
 | AUTO | 2 | 10% |
-| HITL | 17 | 85% |
-| UNSUPPORTED | 1 | 5% |
+| HITL | 15 | 75% |
+| UNSUPPORTED | 3 | 15% |
 
-All 20 seed apps produced a real artifact in this run — including the two
-that failed at RESOLVE — so this table's total is exactly `report.json`'s
-`total_apps: 20`, no reconciliation against CLI console output needed.
-That's itself a measured result, not a given: it's what D-038/D-039 (EMIT
-now builds a real HITL artifact from a failed RESOLVE or DISCOVER, instead
-of returning early with nothing) were built to guarantee.
+All 20 seed apps produced a real artifact in this run — including every
+app that failed at RESOLVE — so this table's total is exactly
+`report.json`'s `total_apps: 20`, no reconciliation against CLI console
+output needed (D-038/D-039).
 
 **The HITL bucket splits into two categories that mean very different
 things, and collapsing them into one number hides the one that actually
@@ -44,100 +50,75 @@ matters:**
 
 | category | count | what it means |
 |---|---|---|
-| **VENDOR_BLOCKED** — irreducible, a human must act | **2** | the vendor's own policy requires payment, business/phone verification, a CAPTCHA, SSO-only signup, or explicitly prohibits automation |
-| **PIPELINE_LIMITED** — reducible, credforge just couldn't confirm | **13** | the vendor doesn't require a human here — credforge's own detection ran out of confidence or coverage before it could say so |
+| **VENDOR_BLOCKED** — irreducible, a human must act | **0** | the vendor's own policy requires payment, business/phone verification, a CAPTCHA, SSO-only signup, or explicitly prohibits automation |
+| **PIPELINE_LIMITED** — reducible, credforge just couldn't confirm | **10** | the vendor doesn't require a human here — credforge's own detection ran out of confidence or coverage before it could say so |
 
-VENDOR_BLOCKED, by app and real evidence:
+**That "0" is this run's real, literal count — and it is also
+demonstrably not a reliable measurement of how often vendors actually
+block.** Re-running three of this run's non-VENDOR_BLOCKED apps in
+isolation immediately surfaced real, evidence-backed vendor blocks the
+batch missed:
 
-- **Etsy** — `tos_prohibits_automation`. developers.etsy.com's own docs
-  state: *"Applications must not sidestep the API to retrieve or post
-  Etsy data. Screen-scraping is not allowed."*
-- **Open-Meteo** — `requires_payment`. open-meteo.com's own docs state:
-  *"apikey ... Only required to commercial use to access reserved API
-  resources for customers."*
+- **Etsy** landed on `resolve_not_found` in this run. Re-run alone
+  moments later: `tos_prohibits_automation`, with developers.etsy.com's
+  own docs quoted directly: *"Applications must not sidestep the API to
+  retrieve or post Etsy data. Screen-scraping is not allowed."*
+- **OpenWeatherMap** landed on `discovery_failed` in this run (and in a
+  second full batch run — see below). Re-run alone, five separate times:
+  five real VENDOR_BLOCKED results (`requires_payment` x2,
+  `requires_sales_contact` x2, `tos_unverifiable` x1), zero failures.
+- **Open-Meteo** landed on `tos_unverifiable` in this run (and in a
+  second batch run too). An earlier real run landed on `requires_payment`
+  with open-meteo.com's own docs quoted: *"apikey ... Only required to
+  commercial use to access reserved API resources for customers."*
 
-PIPELINE_LIMITED, by reason code:
+PIPELINE_LIMITED, by reason code, this run:
 
-- `classify_low_confidence` (11): Auth0, Discord, GitHub, HubSpot,
-  Monday.com, NASA API, Notion, Salesforce, Slack, Spotify, Stripe
-- `discovery_failed` (1): Mailgun
-- `tos_unverifiable` (1): OpenWeatherMap
+- `classify_low_confidence` (8): Auth0, HubSpot, Monday.com, Salesforce,
+  Slack, Spotify, Stripe, Trello
+- `discovery_failed` (1): OpenWeatherMap
+- `tos_unverifiable` (1): Open-Meteo
 
-Plus 2 apps that stopped at RESOLVE, before DISCOVER or GATE ever ran —
-counted inside the HITL total above, not a separate bucket, since both
-produced real HITL artifacts: `resolve_low_confidence` (Google Calendar)
-and `resolve_ambiguous` (Twitter).
+Plus 5 apps that stopped at RESOLVE, before DISCOVER or GATE ever ran —
+counted inside the HITL total above, not a separate bucket, since all
+five produced real HITL artifacts: `resolve_not_found` (Discord, Etsy),
+`resolve_low_confidence` (Google Calendar, Mailgun), `resolve_ambiguous`
+(Twitter).
 
-**AUTO: SendGrid, Trello (both `eligible_auto`).**
+**AUTO: GitHub, SendGrid (both `eligible_auto`).**
 
-**The honest metric this points to: of the 17 apps a human was asked to
-look at, 2 (11.8%) actually needed one.** That's a meaningfully different
-claim than "the pipeline never blocks on a real vendor policy" — it shows
-the VENDOR_BLOCKED/PIPELINE_LIMITED split doing real work: Etsy and
-Open-Meteo have specific, quoted evidence backing a real human-required
-stop, while the other 15 are credforge running out of confidence, not the
-vendor saying no. There's still real, measurable headroom to recover apps
-into AUTO without loosening anything that matters — just not from zero.
+**UNSUPPORTED (3, up from 1): NASA API, Notion, Superhuman — all
+`no_public_api`.** NASA landing here is a direct, verified effect of
+today's fix, not a coincidence — see "What it gets wrong."
 
-**Which single fix would move this number most:** source-authority
-weighting on docs candidates (see "what's next") — it targets
-`classify_low_confidence`'s dominant real cause directly: CLASSIFY
-reading a landing/table-of-contents page instead of a detailed reference
-page, exactly what happened to GitHub in this run and, one stage over, to
-Salesforce's Trailhead-tutorial misread (see "what it gets wrong"). Upper
-bound: all 11 `classify_low_confidence` apps. Realistic estimate,
-qualitative, not a re-measured figure: **a majority, not all** — some of
-these vendors' real docs may genuinely lack the specificity CLASSIFY
-needs regardless of which page gets picked, so not every miss is a
-page-selection problem. `classify_low_confidence` alone is 11 of the 13
-PIPELINE_LIMITED apps — it's the dominant cause by a wide margin, whatever
-fraction of it this specific fix recovers.
+**The honest metric this run points to — "of 15 apps a human was asked to
+look at, 0 actually needed one" — is real but misleading on its own,**
+because it's built from a run whose own reason codes for exactly the
+apps that would answer this question (Etsy, Open-Meteo, OpenWeatherMap)
+are shown above to be unstable. The truer statement, backed by repeated
+real runs: **at least 3 of these 20 vendors have a real, quotable,
+evidence-backed policy blocking automation** — this run's batch execution
+simply didn't land on all three at once. Fail-closed toward HITL is still
+the correct default (a false `AUTO` hands a downstream agent a
+credential-shaped promise that doesn't exist — see the Spotify soft-404
+below), but "the coverage table" as a single-run snapshot is a weaker
+instrument than this project has previously presented it as.
 
-**Why fail-closed is the correct error direction, not just the cautious
-one:** a false `AUTO` hands a downstream agent a credential-shaped
-promise that doesn't exist — the Spotify soft-404 (below) is the proof,
-not a hypothetical: GATE almost shipped an `AUTO` verdict for an app
-whose real Terms of Service were never actually read. A false `HITL`
-costs a human three minutes confirming what credforge couldn't. Those
-two failure costs are not remotely symmetric, which is why every
-uncertain case in this pipeline resolves toward HITL, never toward AUTO
-— and the 2-of-17 figure above is what that conservatism is supposed to
-produce: a small, evidence-backed VENDOR_BLOCKED count, with the rest
-recoverable.
+**Which single fix would move `classify_low_confidence` most:**
+source-authority weighting on docs candidates (see "what's next") —
+CLASSIFY reading a landing/table-of-contents page instead of a detailed
+reference page, the same failure mode as Salesforce's Trailhead-tutorial
+misread (see "what it gets wrong"). `classify_low_confidence` is 8 of the
+10 PIPELINE_LIMITED apps this run — still the dominant cause, though the
+exact count moves between runs (11 in the previous measured run).
 
 **The original seed list's own predicted outcomes (in the build plan)
-turned out wrong for a majority of apps, once real research ran against
-them — worth saying plainly rather than quietly editing the old
-predictions away:**
-
-- **Superhuman** was seeded specifically as the `UNSUPPORTED` /
-  `NO_PUBLIC_API` test case, and in this run it landed exactly there —
-  `no_public_api`, the prediction holding up. That's also evidence D-037's
-  fix (making `UNSUPPORTED` reachable through the real pipeline at all,
-  not just in a unit test — see DECISIONS.md D-037) works end to end, not
-  just in the test that originally caught the bug.
-- **Monday.com** was seeded as the disambiguation demo (an intentionally
-  ambiguous name). It resolved past RESOLVE cleanly — the ambiguity
-  itself wasn't a problem — but landed on `classify_low_confidence`, not
-  `AUTO`; the disambiguation the seed list meant to test isn't what this
-  run actually exercised.
-- **Discord** was seeded as the real `TOS_PROHIBITS_AUTOMATION` example.
-  It got past RESOLVE and DISCOVER this run and landed on
-  `classify_low_confidence` — further than a `resolve_low_confidence`
-  stop, but still not far enough to test the ToS-prohibition path. Etsy,
-  not Discord, is this run's real `tos_prohibits_automation` case (see
-  above), with its own quoted evidence.
-- **Google Calendar**, not Discord, is this run's `resolve_low_confidence`
-  case — RESOLVE scored `google.com` at 0.6357 against "Google Calendar,"
-  just under the 0.7 threshold, because the name-similarity check compares
-  the full app name against a domain label containing only part of it.
-- Of the apps the plan marked "to verify": Mailgun and Etsy landed in the
-  same status family the plan guessed (HITL), just not always the same
-  reason code — Mailgun on `discovery_failed` rather than a
-  payment/verification block, Etsy on a real ToS prohibition rather than
-  app review. **SendGrid did not** — the plan guessed HITL
-  (phone/manual review), and it landed on `AUTO` (`eligible_auto`)
-  instead, a different status family, not just a different reason code.
+continue to turn out wrong for a majority of apps, run to run, not just
+once** — Superhuman is the one seed prediction that has now held twice
+running (`UNSUPPORTED`/`no_public_api`, both this run and the prior
+measured one); everything else has landed differently across the two
+most recent real runs alone, which is itself the volatility finding
+below, not a separate story per app.
 
 ## What it gets wrong
 
@@ -155,18 +136,41 @@ predictions away:**
   Full account in DECISIONS.md D-035. The underlying detection is still a
   hand-maintained keyword list, not a general solution — see "what's
   next."
-- **`TOS_UNVERIFIABLE` is a real, current coverage gap, not just a safe
-  fallback.** 1 of 20 seed apps (OpenWeatherMap) landed there this run
-  because GATE's seven conventional ToS-path guesses didn't happen to hit
-  the vendor's real terms page. That's the deliberately safe failure mode
-  (D-021 — never assume a policy is clean because the page couldn't be
-  found), but it means real apps that might be perfectly fine to automate
-  can get routed to a human anyway, purely on findability. This bucket is
-  small in this run specifically because D-040 (GATE now scans the
-  developer-docs page it had already fetched, not just the dedicated ToS
-  page) exists — Etsy's and Open-Meteo's real, evidence-backed
-  VENDOR_BLOCKED findings above came from exactly that cross-source scan,
-  which is the concrete signal D-040 was built to produce.
+- **The coverage table above is a noisier instrument than a single run
+  makes it look, confirmed by running the exact same batch twice.** Two
+  full 20-app batch runs, same code, same seed list, back to back:
+  10 of 20 apps landed on the *same* status and reason code both times;
+  the other 10 didn't, for reasons with zero connection to any code
+  changed today (their RESOLVE call is byte-identical run to run — the
+  difference is DDG's returned results and the LLM extraction's read of
+  them, not credforge's own logic). Etsy alone produced three different
+  reason codes across three separate real runs
+  (`tos_prohibits_automation` / `resolve_not_found` / `tos_unverifiable`).
+  `TOS_UNVERIFIABLE` specifically is real and current (D-021's
+  deliberately safe fallback when GATE's ToS-path guesses miss), but
+  *which* apps land there is itself unstable run to run — treat any
+  single run's per-app breakdown as one sample, not a stable
+  classification of the vendor.
+- **RESOLVE now correctly points at a vendor's real docs — and that
+  surfaced a second, separate, previously-hidden problem: DISCOVER can't
+  read a JavaScript-rendered page.** NASA API's `docs_url` now correctly
+  pins to `api.nasa.gov` (D-048) instead of the wrong `sti.nasa.gov` — but
+  DISCOVER (a plain HTTP fetch, no JS execution) sees only a
+  `Loading signup form...` placeholder shell there, since the real content
+  loads client-side. Confirmed directly: the raw HTML has no API
+  documentation prose at all. Only `PlaywrightBrowserDriver` (PROVISION)
+  renders JS in this project. NASA now lands on `UNSUPPORTED`/
+  `no_public_api` — reproducibly, four runs straight — a real, honest
+  regression in *what DISCOVER can see*, traded for a real fix in *where
+  RESOLVE points*. Separately: OpenWeatherMap's newly-pinned docs URL
+  (`openweathermap.org/api`) succeeds reliably in isolation (5 of 5 runs)
+  but failed in both full 20-app batch runs specifically — ruled out the
+  per-domain rate limiter (no cross-domain interference) and ruled out
+  "batch command mechanics" (a batch containing only OpenWeatherMap
+  succeeds); root cause not fully isolated, most likely something in
+  httpx's connection handling over a long sequential run. Both are real,
+  current, unresolved gaps, not swept into the coverage table's "0
+  VENDOR_BLOCKED" without comment.
 - **CLASSIFY's confidence score measures how clearly the extraction task
   could be done, not whether the answer is actually correct.** A page can
   state an auth scheme in unambiguous prose and still be the wrong page
@@ -237,7 +241,7 @@ predictions away:**
 - [`RUNBOOK_MANUAL.md`](RUNBOOK_MANUAL.md) — the human process this
   replaces, step by step, marked with what's automated vs. handed off.
 - [`DECISIONS.md`](DECISIONS.md) — every meaningful technical choice,
-  what was rejected, and why. 46 entries.
+  what was rejected, and why. 48 entries.
 - [`TRACE.md`](TRACE.md) — GitHub, followed end to end, real numbers,
   written to be read aloud.
 - [`OPS.md`](OPS.md) — where this runs, what happens if it dies

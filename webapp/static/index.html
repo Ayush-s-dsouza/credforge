@@ -82,6 +82,10 @@ here; real under the CLI's <code>--live</code>) provision + validate a credentia
   <div class="examples-row" id="live-buttons-row">
     <span style="align-self:center;opacity:.7;font-size:.85em;">real live credential attempt:</span>
   </div>
+  <p class="warn" style="font-size:.85em;">Railway's filesystem is ephemeral: a credential acquired by a live
+     run here is real (vaulted, then validated with a real API call) but lives only in this container's
+     disk. It's shown to you in this session and then gone -- it does <strong>not</strong> persist across a
+     redeploy or restart. The one credential meant to persist is the static NASA example above.</p>
   <div>
     <input type="text" id="app-input" placeholder="app name, e.g. Stripe">
     <button id="run-btn" onclick="runApp()">Run</button>

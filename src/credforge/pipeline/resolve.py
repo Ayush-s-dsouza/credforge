@@ -40,7 +40,7 @@ from ..models.state import ResolveCandidate, ResolveResult
 from ..providers.fetch import FetchException, FetchProvider
 from ..providers.search import SearchProvider, SearchProviderError, SearchResult
 from ..registry.identity import slugify, unresolved_identity_key
-from ..utils.domains import registrable_domain, subdomain_of
+from ..utils.domains import parse_bare_domain, registrable_domain, subdomain_of
 from .explain import NULL_EXPLAIN, ExplainEvent, ExplainSink
 
 # A domain below this confidence isn't worth listing as an alternate at all.
@@ -418,6 +418,96 @@ async def _resolve_via_search_failure_fallback(
     return ResolveResult(resolved=True, chosen=top, alternates=[])
 
 
+# --- Recipe-pinned identity (DECISIONS.md D-048) -----------------------
+#
+# A registered SignupRecipe already encodes vendor identity: someone read
+# that vendor's real signup page and its real docs page to build it, so
+# the domain and the docs URL are already known, verified facts -- not
+# something RESOLVE should re-derive via search. This pins IDENTITY ONLY:
+# DISCOVER/CLASSIFY/GATE still run for real against the pinned docs_url,
+# and GATE's verdict is still fully binding. See _resolve_bare_domain and
+# `resolve()` for where that boundary is enforced (a pinned candidate is
+# handed to the exact same downstream stages as any other RESOLVE result,
+# nothing about GATE's own logic is touched).
+
+
+def _match_recipe_identity(app_name: str) -> tuple[str, str] | None:
+    """(domain, docs_url) if `app_name` clearly identifies a vendor with a
+    registered live SignupRecipe -- either the exact domain, or the
+    domain's own label appearing in the slugified input (`"NASA API"` ->
+    `"nasa-api"` contains `"nasa"`, the label of `"nasa.gov"`). Lazy
+    import: signup_recipes.py itself has no forced dependency on the
+    `live` extra (playwright is only ever imported inside a method body),
+    but keeping this import local to the one function that needs it keeps
+    that guarantee visible at the call site, not just true by accident."""
+    from ..providers.signup_recipes import LIVE_SIGNUP_RECIPES
+
+    bare = parse_bare_domain(app_name)
+    slug = slugify(app_name)
+    for domain, recipe in LIVE_SIGNUP_RECIPES.items():
+        if bare == domain or _domain_label(domain) in slug:
+            return domain, recipe.docs_url
+    return None
+
+
+def _pinned_candidate(domain: str, docs_url: str | None, *, evidence_snippet: str, docs_url_reason: str) -> ResolveCandidate:
+    return ResolveCandidate(
+        domain=domain,
+        docs_url=docs_url,
+        docs_url_candidates=[docs_url] if docs_url else [],
+        docs_url_reason=docs_url_reason if docs_url else None,
+        confidence=1.0,
+        evidence_url=docs_url or f"https://{domain}",
+        evidence_snippet=evidence_snippet,
+    )
+
+
+# --- Bare domain trust (DECISIONS.md D-047) -----------------------------
+
+
+async def _resolve_bare_domain(
+    domain: str,
+    *,
+    search: SearchProvider,
+    fetch: FetchProvider,
+    explain: ExplainSink,
+) -> ResolveResult:
+    """The input already IS a domain -- searching for "who this vendor is"
+    would be searching for an answer already in hand. Skips candidate
+    scoring entirely; docs-URL discovery still runs for real (a bare
+    domain says nothing about where its docs live)."""
+    explain.emit(
+        ExplainEvent(
+            stage=PipelineStage.RESOLVE,
+            identity_key=domain,
+            message=f"input is an exact domain ({domain}) -- trusting it directly, skipping candidate search",
+        )
+    )
+
+    verified_docs = await _discover_docs_candidates(domain, domain, search=search, fetch=fetch)
+    docs_url_candidates = [url for url, _ in verified_docs]
+    docs_url = docs_url_candidates[0] if docs_url_candidates else None
+    docs_url_reason = verified_docs[0][1] if verified_docs else None
+
+    chosen = ResolveCandidate(
+        domain=domain,
+        docs_url=docs_url,
+        docs_url_candidates=docs_url_candidates,
+        docs_url_reason=docs_url_reason,
+        confidence=1.0,
+        evidence_url=f"https://{domain}",
+        evidence_snippet="exact domain supplied as input",
+    )
+    explain.emit(
+        ExplainEvent(
+            stage=PipelineStage.RESOLVE,
+            identity_key=domain,
+            message=f"resolved to {domain} (confidence 1.0, exact input); docs_url={docs_url or 'not confirmed'}",
+        )
+    )
+    return ResolveResult(resolved=True, chosen=chosen, alternates=[])
+
+
 async def resolve(
     app_name: str,
     *,
@@ -431,6 +521,31 @@ async def resolve(
         return ResolveResult(resolved=False, reason_code=ReasonCode.MALFORMED_INPUT)
 
     identity_key = unresolved_identity_key(cleaned)
+
+    recipe_match = _match_recipe_identity(cleaned)
+    if recipe_match:
+        domain, docs_url = recipe_match
+        chosen = _pinned_candidate(
+            domain,
+            docs_url,
+            evidence_snippet=f"identity pinned by registered SignupRecipe for {domain}",
+            docs_url_reason="pinned by registered SignupRecipe -- known, real developer-docs URL, not re-derived",
+        )
+        explain.emit(
+            ExplainEvent(
+                stage=PipelineStage.RESOLVE,
+                identity_key=domain,
+                message=(
+                    f"recipe-pinned identity: {domain} (docs_url={docs_url}) -- "
+                    "identity only, GATE still evaluates independently and its verdict is still binding"
+                ),
+            )
+        )
+        return ResolveResult(resolved=True, chosen=chosen, alternates=[])
+
+    bare_domain = parse_bare_domain(cleaned)
+    if bare_domain:
+        return await _resolve_bare_domain(bare_domain, search=search, fetch=fetch, explain=explain)
 
     try:
         results = await search.search(f"{cleaned} official website", count=8)

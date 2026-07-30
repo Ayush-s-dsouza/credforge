@@ -6,7 +6,7 @@ its ExplainSink events out over SSE instead of printing them to a
 terminal. Mock provisioning by default; live provisioning (real Playwright
 + IMAP) only for the small, fixed set of vendors with a registered
 SignupRecipe, chosen per-request and disclosed in the stream -- see
-_matches_live_recipe() below and DECISIONS.md D-042/D-046.
+DECISIONS.md D-042/D-046/D-048.
 """
 
 import asyncio
@@ -35,32 +35,23 @@ from credforge.registry.store import AppendOnlyRegistry  # noqa: E402
 from credforge.run_context import new_run_id  # noqa: E402
 from credforge.vault.crypto_vault import FernetVault  # noqa: E402
 
+from credforge.pipeline.resolve import _match_recipe_identity  # noqa: E402
+from credforge.providers.signup_recipes import LIVE_SIGNUP_RECIPES  # noqa: E402
+
 ACCESS_TOKEN = os.environ.get("WEB_ACCESS_TOKEN", "")
 RUN_CAP = int(os.environ.get("RUN_CAP", "100"))
 RATE_LIMIT_PER_MIN = int(os.environ.get("RATE_LIMIT_PER_MIN", "3"))
 EXAMPLES_DIR = REPO_ROOT / "examples"
 LIVE_RUN_CAP = int(os.environ.get("LIVE_RUN_CAP", "20"))
 
-# Recipe-backed vendors are a small, fixed, known set (signup_recipes.py) --
-# matched here by simple keyword against the raw user input, since the web
-# layer must pick a ProviderBundle *before* run_app's own RESOLVE stage runs
-# and resolves the real domain. No pipeline logic duplicated: this is only
-# "which of two pre-built provider bundles do we hand to the same run_app,"
-# never a second RESOLVE.
-_LIVE_RECIPE_KEYWORDS = {"nasa": "NASA API", "openweathermap": "OpenWeatherMap", "openweather": "OpenWeatherMap"}
-# The literal registrable domain, not the display label -- passing this
-# directly as RESOLVE's input avoids a real, known failure mode where a
-# generic name search lands on the wrong domain (NASA API -> sti.nasa.gov
-# instead of api.nasa.gov). A legitimate input choice, not a pipeline bypass.
-_LIVE_RECIPE_DOMAINS = {"NASA API": "nasa.gov", "OpenWeatherMap": "openweathermap.org"}
-
-
-def _matches_live_recipe(app_name: str) -> str | None:
-    low = app_name.lower()
-    for kw, label in _LIVE_RECIPE_KEYWORDS.items():
-        if kw in low:
-            return label
-    return None
+# Which ProviderBundle to hand to run_app must be decided *before*
+# run_app's own RESOLVE stage runs and resolves the real domain -- so this
+# reuses RESOLVE's own recipe-identity matcher (D-048) rather than
+# duplicating a second, driftable copy of "which vendors have a recipe."
+# Purely cosmetic display names for the one-click buttons -- no matching
+# logic lives here, just a label for what _match_recipe_identity() already
+# resolved by domain.
+_RECIPE_DISPLAY_NAMES = {"nasa.gov": "NASA API", "openweathermap.org": "OpenWeatherMap"}
 
 
 settings = Settings()
@@ -183,8 +174,8 @@ def status() -> dict:
         "live_runs_remaining": max(0, LIVE_RUN_CAP - _read_json_counter(LIVE_COUNTER_PATH)),
         "live_enabled": _live_enabled,
         "live_recipe_vendors": [
-            {"label": label, "domain": _LIVE_RECIPE_DOMAINS.get(label, label)}
-            for label in sorted(set(_LIVE_RECIPE_KEYWORDS.values()))
+            {"label": _RECIPE_DISPLAY_NAMES.get(domain, domain), "domain": domain}
+            for domain in sorted(LIVE_SIGNUP_RECIPES)
         ],
         "search_provider": "brave" if settings.brave_api_key else "ddg",
     }
@@ -221,7 +212,8 @@ async def api_run(request: Request, k: str | None = Query(None)) -> StreamingRes
     if not _check_rate_limit(ip):
         raise HTTPException(429, "rate limit exceeded -- a few runs per minute per IP, try again shortly")
 
-    recipe_match = _matches_live_recipe(app_name)
+    recipe_match = _match_recipe_identity(app_name)  # (domain, docs_url) or None
+    recipe_label = _RECIPE_DISPLAY_NAMES.get(recipe_match[0], recipe_match[0]) if recipe_match else None
     use_live = bool(recipe_match and _live_enabled)
 
     async with _counter_lock:
@@ -253,10 +245,10 @@ async def api_run(request: Request, k: str | None = Query(None)) -> StreamingRes
                 "type": "mode",
                 "live": use_live,
                 "message": (
-                    f"LIVE provisioning -- recipe registered for {recipe_match}, real signup will be attempted"
+                    f"LIVE provisioning -- recipe registered for {recipe_label}, real signup will be attempted"
                     if use_live
                     else (
-                        f"Mocked provisioning -- no signup recipe registered for this vendor"
+                        "Mocked provisioning -- no signup recipe registered for this vendor"
                         if not recipe_match
                         else "Mocked provisioning -- live provisioning is disabled on this deployment"
                     )

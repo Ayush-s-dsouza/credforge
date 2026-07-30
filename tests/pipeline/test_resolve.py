@@ -603,3 +603,197 @@ async def test_search_failure_still_produces_a_real_artifact_shaped_result_not_a
     result = await resolve("AnythingAtAll", search=search, fetch=fetch)
 
     assert isinstance(result, ResolveResult)
+
+
+# --- Bare domain trust (D-047) -------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bare_domain_input_is_trusted_directly_without_any_identification_search() -> None:
+    # The input already IS a domain -- "acmewidgets.io official website"
+    # would be searching for an answer already in hand. No recipe is
+    # registered for this domain, so this exercises bare-domain-trust
+    # alone, not recipe-pinning.
+    search = FakeSearchProvider()  # would return [] for anything -- the point is what's queried at all
+    fetch = FakeFetchProvider()  # every fetch fails -- docs discovery is attempted but finds nothing
+
+    result = await resolve("acmewidgets.io", search=search, fetch=fetch)
+
+    assert result.resolved is True
+    assert result.chosen.domain == "acmewidgets.io"
+    assert result.chosen.confidence == 1.0
+    assert result.chosen.evidence_snippet == "exact domain supplied as input"
+    # never issued the identification query -- only docs-discovery queries,
+    # which is a real, separate search (proving "skip candidate scoring
+    # entirely" specifically, not "skip all search calls")
+    assert "acmewidgets.io official website" not in search.calls
+    assert search.calls == [
+        "acmewidgets.io developer API documentation",
+        "acmewidgets.io developer docs",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bare_domain_input_still_finds_and_verifies_a_real_docs_url() -> None:
+    search = FakeSearchProvider(
+        {
+            "acmewidgets.io developer API documentation": [
+                SearchResult(title="Docs", url="https://docs.acmewidgets.io/", snippet="...", rank=1),
+            ],
+        }
+    )
+    fetch = FakeFetchProvider({"https://docs.acmewidgets.io/": _ok("https://docs.acmewidgets.io/")})
+
+    result = await resolve("acmewidgets.io", search=search, fetch=fetch)
+
+    assert result.resolved is True
+    assert result.chosen.docs_url == "https://docs.acmewidgets.io/"
+
+
+@pytest.mark.asyncio
+async def test_subdomain_input_is_not_bare_and_does_not_trigger_domain_trust() -> None:
+    # "api.widgetvendor.io" has a subdomain -- not "bare" -- so it must
+    # fall through to the normal candidate-scoring path, not be blindly
+    # trusted. (No recipe is registered for this domain either, so this
+    # isolates bare-domain-trust's own subdomain exclusion specifically,
+    # not recipe-pinning's separate, broader name-matching.)
+    search = FakeSearchProvider(
+        {
+            "api.widgetvendor.io official website": [
+                SearchResult(title="WidgetVendor", url="https://widgetvendor.io/", snippet="...", rank=1),
+            ],
+        }
+    )
+    fetch = FakeFetchProvider()
+
+    result = await resolve("api.widgetvendor.io", search=search, fetch=fetch)
+
+    assert search.calls[0] == "api.widgetvendor.io official website"  # normal path was used, not bare-domain-trust
+
+
+@pytest.mark.asyncio
+async def test_bare_domain_trust_does_not_weaken_ambiguity_a_real_company_name_still_halts() -> None:
+    # The explicit guard: "Sage" (a real company name, not a domain-shaped
+    # string at all) must still go through normal candidate scoring and
+    # halt on RESOLVE_AMBIGUOUS when two real candidates are genuinely
+    # close -- bare-domain-trust must never be reachable for input that
+    # isn't already a domain.
+    # Precondition, computed from the real scoring function rather than
+    # hand-derived (same pattern as the Meridian/acme.com test above):
+    # sageintacct.com (0.6667) and sagepay.com (0.6136) score within
+    # AMBIGUITY_MARGIN (0.15) of each other -- both real Sage-brand
+    # product domains, a realistic close call.
+    search = FakeSearchProvider(
+        {
+            "Sage official website": [
+                SearchResult(title="Sage Intacct", url="https://sageintacct.com/", snippet="...", rank=1),
+                SearchResult(title="Sage Pay", url="https://sagepay.com/", snippet="...", rank=2),
+            ],
+        }
+    )
+    fetch = FakeFetchProvider()
+
+    result = await resolve("Sage", search=search, fetch=fetch)
+
+    assert result.resolved is False
+    assert result.reason_code == ReasonCode.RESOLVE_AMBIGUOUS
+    assert {c.domain for c in result.alternates} == {"sageintacct.com", "sagepay.com"}
+    assert fetch.calls == []  # docs discovery never attempted on an ambiguous result
+
+
+# --- Recipe-pinned identity (D-048) --------------------------------------
+
+from credforge.enums import CredentialType  # noqa: E402
+from credforge.providers.playwright_browser import SignupRecipe  # noqa: E402
+
+_FAKE_RECIPES = {
+    "widgetvendor.com": SignupRecipe(
+        email_field_selector="#email",
+        submit_selector="#submit",
+        credential_type=CredentialType.API_KEY,
+        docs_url="https://widgetvendor.com/real-docs",
+    ),
+}
+
+
+@pytest.mark.asyncio
+async def test_recipe_pinned_domain_input_short_circuits_with_zero_provider_calls(monkeypatch) -> None:
+    import credforge.providers.signup_recipes as signup_recipes_module
+
+    monkeypatch.setattr(signup_recipes_module, "LIVE_SIGNUP_RECIPES", _FAKE_RECIPES)
+    search = FakeSearchProvider()
+    fetch = FakeFetchProvider()
+
+    result = await resolve("widgetvendor.com", search=search, fetch=fetch)
+
+    assert result.resolved is True
+    assert result.chosen.domain == "widgetvendor.com"
+    assert result.chosen.docs_url == "https://widgetvendor.com/real-docs"
+    assert result.chosen.confidence == 1.0
+    # fully short-circuited -- a recipe already IS the docs URL, no
+    # discovery search/fetch needed at all, unlike plain bare-domain-trust
+    assert search.calls == []
+    assert fetch.calls == []
+
+
+@pytest.mark.asyncio
+async def test_recipe_pinned_name_input_also_short_circuits(monkeypatch) -> None:
+    # The vendor's common name, not its domain -- the whole point of
+    # recipe-pinning beyond plain bare-domain-trust: a name a user would
+    # actually type still benefits, not just a literal domain string.
+    import credforge.providers.signup_recipes as signup_recipes_module
+
+    monkeypatch.setattr(signup_recipes_module, "LIVE_SIGNUP_RECIPES", _FAKE_RECIPES)
+    search = FakeSearchProvider()
+    fetch = FakeFetchProvider()
+
+    result = await resolve("WidgetVendor", search=search, fetch=fetch)
+
+    assert result.resolved is True
+    assert result.chosen.domain == "widgetvendor.com"
+    assert result.chosen.docs_url == "https://widgetvendor.com/real-docs"
+    assert search.calls == []
+    assert fetch.calls == []
+
+
+@pytest.mark.asyncio
+async def test_recipe_pin_takes_priority_over_plain_bare_domain_trust(monkeypatch) -> None:
+    # "widgetvendor.com" is both bare-domain-shaped AND a recipe key --
+    # the recipe's own known docs_url must win over generic docs-discovery
+    # (which would need real search/fetch calls this test proves never
+    # happen).
+    import credforge.providers.signup_recipes as signup_recipes_module
+
+    monkeypatch.setattr(signup_recipes_module, "LIVE_SIGNUP_RECIPES", _FAKE_RECIPES)
+    search = FakeSearchProvider({"widgetvendor.com developer API documentation": [
+        SearchResult(title="wrong", url="https://widgetvendor.com/wrong-docs", snippet="...", rank=1),
+    ]})
+    fetch = FakeFetchProvider({"https://widgetvendor.com/wrong-docs": _ok("https://widgetvendor.com/wrong-docs")})
+
+    result = await resolve("widgetvendor.com", search=search, fetch=fetch)
+
+    assert result.chosen.docs_url == "https://widgetvendor.com/real-docs"  # recipe's, not discovery's
+    assert search.calls == []
+    assert fetch.calls == []
+
+
+@pytest.mark.asyncio
+async def test_real_registered_recipes_are_actually_pinnable_not_just_the_test_fixture() -> None:
+    # Not a unit test of resolve()'s logic (covered above with fake
+    # recipes) -- a guard against the *production* NASA/OpenWeatherMap
+    # recipes silently drifting out of sync with what RESOLVE can match.
+    search = FakeSearchProvider()
+    fetch = FakeFetchProvider()
+
+    nasa = await resolve("NASA API", search=search, fetch=fetch)
+    assert nasa.resolved is True
+    assert nasa.chosen.domain == "nasa.gov"
+    assert nasa.chosen.docs_url == "https://api.nasa.gov/"
+
+    owm = await resolve("OpenWeatherMap", search=search, fetch=fetch)
+    assert owm.resolved is True
+    assert owm.chosen.domain == "openweathermap.org"
+    assert owm.chosen.docs_url == "https://openweathermap.org/api"
+
+    assert search.calls == []
+    assert fetch.calls == []
