@@ -1,0 +1,52 @@
+{
+  "status": "HITL",
+  "reason_code": "classify_low_confidence",
+  "app": {
+    "app_name": "Discord",
+    "identity_key": "discord.com"
+  },
+  "api": {
+    "docs_url": null,
+    "base_url": null,
+    "developer_portal_url": "Developer Portal",
+    "auth_scheme": "no_public_api",
+    "rate_limit_notes": null,
+    "pagination_style_hint": null,
+    "validation_endpoint": null,
+    "scopes_available": [],
+    "redirect_uris_required": false
+  },
+  "credential": null,
+  "validation": null,
+  "evidence": [
+    {
+      "claim": "resolved identity to discord.com",
+      "source_url": "https://discord.com/",
+      "snippet": "Discord is great for playing games and chilling with friends, or even building a worldwide community. Customize your own space to talk, play, and hang out. Use custom emoji, stickers, soundboard effects and more to add your personality to your voice, video, or text chat."
+    }
+  ],
+  "completeness_gaps": [
+    {
+      "field": "base_url",
+      "reason": "not stated in prose on the crawled page; derivable from concrete endpoint examples elsewhere in the docs"
+    },
+    {
+      "field": "rate_limit_notes",
+      "reason": "not stated in prose on the crawled page; check response headers or a dedicated rate-limits page"
+    },
+    {
+      "field": "pagination_style_hint",
+      "reason": "not stated in prose on the crawled page; derivable from example list-endpoint responses"
+    },
+    {
+      "field": "validation_endpoint",
+      "reason": "not stated in prose on the crawled page; the downstream agent can pick any cheap read-only endpoint from the reference"
+    }
+  ],
+  "provenance": {
+    "run_id": "run_20260730T023149Z_37a0e4fe",
+    "resolved_at": "2026-07-30T02:43:51.185361Z",
+    "emitted_at": "2026-07-30T02:44:27.811053Z",
+    "credforge_version": "0.1.0"
+  }
+}

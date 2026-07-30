@@ -1,0 +1,52 @@
+{
+  "status": "HITL",
+  "reason_code": "classify_low_confidence",
+  "app": {
+    "app_name": "Notion",
+    "identity_key": "notion.com"
+  },
+  "api": {
+    "docs_url": "https://developers.notion.com/guides/get-started/overview",
+    "base_url": null,
+    "developer_portal_url": "https://developers.notion.com/guides/get-started/overview",
+    "auth_scheme": "oauth2_auth_code",
+    "rate_limit_notes": null,
+    "pagination_style_hint": null,
+    "validation_endpoint": null,
+    "scopes_available": [],
+    "redirect_uris_required": false
+  },
+  "credential": null,
+  "validation": null,
+  "evidence": [
+    {
+      "claim": "resolved identity to notion.com",
+      "source_url": "https://www.notion.com/",
+      "snippet": "Notion is always at home right in your browser. Build Custom Agents, search across all your apps, and automate busywork. The AI workspace where teams get more done, faster."
+    }
+  ],
+  "completeness_gaps": [
+    {
+      "field": "base_url",
+      "reason": "not stated in prose on the crawled page; derivable from concrete endpoint examples elsewhere in the docs"
+    },
+    {
+      "field": "rate_limit_notes",
+      "reason": "not stated in prose on the crawled page; check response headers or a dedicated rate-limits page"
+    },
+    {
+      "field": "pagination_style_hint",
+      "reason": "not stated in prose on the crawled page; derivable from example list-endpoint responses"
+    },
+    {
+      "field": "validation_endpoint",
+      "reason": "not stated in prose on the crawled page; the downstream agent can pick any cheap read-only endpoint from the reference"
+    }
+  ],
+  "provenance": {
+    "run_id": "run_20260730T023149Z_37a0e4fe",
+    "resolved_at": "2026-07-30T02:39:29.387307Z",
+    "emitted_at": "2026-07-30T02:40:07.825201Z",
+    "credforge_version": "0.1.0"
+  }
+}

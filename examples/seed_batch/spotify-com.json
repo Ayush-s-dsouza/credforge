@@ -1,0 +1,52 @@
+{
+  "status": "HITL",
+  "reason_code": "classify_low_confidence",
+  "app": {
+    "app_name": "Spotify",
+    "identity_key": "spotify.com"
+  },
+  "api": {
+    "docs_url": null,
+    "base_url": null,
+    "developer_portal_url": "https://developers.spotify.com",
+    "auth_scheme": "oauth2_auth_code",
+    "rate_limit_notes": null,
+    "pagination_style_hint": null,
+    "validation_endpoint": null,
+    "scopes_available": [],
+    "redirect_uris_required": true
+  },
+  "credential": null,
+  "validation": null,
+  "evidence": [
+    {
+      "claim": "resolved identity to spotify.com",
+      "source_url": "https://open.spotify.com/",
+      "snippet": "Spotify is a digital music service that gives you access to millions of songs."
+    }
+  ],
+  "completeness_gaps": [
+    {
+      "field": "base_url",
+      "reason": "not stated in prose on the crawled page; derivable from concrete endpoint examples elsewhere in the docs"
+    },
+    {
+      "field": "rate_limit_notes",
+      "reason": "not stated in prose on the crawled page; check response headers or a dedicated rate-limits page"
+    },
+    {
+      "field": "pagination_style_hint",
+      "reason": "not stated in prose on the crawled page; derivable from example list-endpoint responses"
+    },
+    {
+      "field": "validation_endpoint",
+      "reason": "not stated in prose on the crawled page; the downstream agent can pick any cheap read-only endpoint from the reference"
+    }
+  ],
+  "provenance": {
+    "run_id": "run_20260730T023149Z_37a0e4fe",
+    "resolved_at": "2026-07-30T02:34:07.125702Z",
+    "emitted_at": "2026-07-30T02:34:35.539975Z",
+    "credforge_version": "0.1.0"
+  }
+}

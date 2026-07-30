@@ -1,0 +1,63 @@
+{
+  "status": "HITL",
+  "reason_code": "tos_prohibits_automation",
+  "app": {
+    "app_name": "Etsy",
+    "identity_key": "etsy.com"
+  },
+  "api": {
+    "docs_url": "https://developers.etsy.com/documentation/",
+    "base_url": null,
+    "developer_portal_url": null,
+    "auth_scheme": "oauth2_auth_code",
+    "rate_limit_notes": null,
+    "pagination_style_hint": null,
+    "validation_endpoint": null,
+    "scopes_available": [
+      "transaction_r"
+    ],
+    "redirect_uris_required": true
+  },
+  "credential": null,
+  "validation": null,
+  "evidence": [
+    {
+      "claim": "resolved identity to etsy.com",
+      "source_url": "https://etsy.com/",
+      "snippet": "Shop our Official Merch on Etsy."
+    },
+    {
+      "claim": "developer docs prohibits automated account creation",
+      "source_url": "https://developers.etsy.com/documentation/",
+      "snippet": "Applications must not sidestep the API to retrieve or post Etsy data. Screen-scraping is not allowed."
+    }
+  ],
+  "completeness_gaps": [
+    {
+      "field": "base_url",
+      "reason": "not stated in prose on the crawled page; derivable from concrete endpoint examples elsewhere in the docs"
+    },
+    {
+      "field": "developer_portal_url",
+      "reason": "not stated in prose on the crawled page"
+    },
+    {
+      "field": "rate_limit_notes",
+      "reason": "not stated in prose on the crawled page; check response headers or a dedicated rate-limits page"
+    },
+    {
+      "field": "pagination_style_hint",
+      "reason": "not stated in prose on the crawled page; derivable from example list-endpoint responses"
+    },
+    {
+      "field": "validation_endpoint",
+      "reason": "not stated in prose on the crawled page; the downstream agent can pick any cheap read-only endpoint from the reference"
+    }
+  ],
+  "provenance": {
+    "run_id": "run_20260730T023149Z_37a0e4fe",
+    "resolved_at": "2026-07-30T02:35:24.895407Z",
+    "emitted_at": "2026-07-30T02:36:22.319598Z",
+    "credforge_version": "0.1.0"
+  }
+}

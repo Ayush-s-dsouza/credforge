@@ -1,0 +1,204 @@
+{
+  "run_id": "run_20260730T023149Z_37a0e4fe",
+  "generated_at": "2026-07-30T02:44:28.042715Z",
+  "total_apps": 20,
+  "skipped_files": 0,
+  "status_counts": {
+    "HITL": 17,
+    "AUTO": 2,
+    "UNSUPPORTED": 1
+  },
+  "reason_code_counts": {
+    "classify_low_confidence": 11,
+    "tos_prohibits_automation": 1,
+    "discovery_failed": 1,
+    "requires_payment": 1,
+    "tos_unverifiable": 1,
+    "eligible_auto": 2,
+    "no_public_api": 1,
+    "resolve_low_confidence": 1,
+    "resolve_ambiguous": 1
+  },
+  "needs_attention": [
+    {
+      "identity_key": "auth0.com",
+      "app_name": "Auth0",
+      "reason_code": "classify_low_confidence",
+      "completeness_gap_fields": [
+        "base_url",
+        "rate_limit_notes",
+        "pagination_style_hint",
+        "validation_endpoint"
+      ]
+    },
+    {
+      "identity_key": "discord.com",
+      "app_name": "Discord",
+      "reason_code": "classify_low_confidence",
+      "completeness_gap_fields": [
+        "base_url",
+        "rate_limit_notes",
+        "pagination_style_hint",
+        "validation_endpoint"
+      ]
+    },
+    {
+      "identity_key": "github.com",
+      "app_name": "GitHub",
+      "reason_code": "classify_low_confidence",
+      "completeness_gap_fields": [
+        "base_url",
+        "pagination_style_hint",
+        "validation_endpoint"
+      ]
+    },
+    {
+      "identity_key": "hubspot.com",
+      "app_name": "HubSpot",
+      "reason_code": "classify_low_confidence",
+      "completeness_gap_fields": [
+        "base_url",
+        "rate_limit_notes",
+        "pagination_style_hint",
+        "validation_endpoint"
+      ]
+    },
+    {
+      "identity_key": "monday.com",
+      "app_name": "Monday.com",
+      "reason_code": "classify_low_confidence",
+      "completeness_gap_fields": [
+        "base_url",
+        "rate_limit_notes",
+        "pagination_style_hint",
+        "validation_endpoint"
+      ]
+    },
+    {
+      "identity_key": "nasa.gov",
+      "app_name": "NASA API",
+      "reason_code": "classify_low_confidence",
+      "completeness_gap_fields": [
+        "base_url",
+        "rate_limit_notes",
+        "pagination_style_hint",
+        "validation_endpoint"
+      ]
+    },
+    {
+      "identity_key": "notion.com",
+      "app_name": "Notion",
+      "reason_code": "classify_low_confidence",
+      "completeness_gap_fields": [
+        "base_url",
+        "rate_limit_notes",
+        "pagination_style_hint",
+        "validation_endpoint"
+      ]
+    },
+    {
+      "identity_key": "salesforce.com",
+      "app_name": "Salesforce",
+      "reason_code": "classify_low_confidence",
+      "completeness_gap_fields": [
+        "base_url",
+        "developer_portal_url",
+        "rate_limit_notes",
+        "pagination_style_hint",
+        "validation_endpoint"
+      ]
+    },
+    {
+      "identity_key": "slack.com",
+      "app_name": "Slack",
+      "reason_code": "classify_low_confidence",
+      "completeness_gap_fields": [
+        "base_url",
+        "developer_portal_url",
+        "rate_limit_notes",
+        "pagination_style_hint",
+        "validation_endpoint"
+      ]
+    },
+    {
+      "identity_key": "spotify.com",
+      "app_name": "Spotify",
+      "reason_code": "classify_low_confidence",
+      "completeness_gap_fields": [
+        "base_url",
+        "rate_limit_notes",
+        "pagination_style_hint",
+        "validation_endpoint"
+      ]
+    },
+    {
+      "identity_key": "stripe.com",
+      "app_name": "Stripe",
+      "reason_code": "classify_low_confidence",
+      "completeness_gap_fields": [
+        "base_url",
+        "developer_portal_url",
+        "pagination_style_hint",
+        "validation_endpoint"
+      ]
+    },
+    {
+      "identity_key": "mailgun.com",
+      "app_name": "Mailgun",
+      "reason_code": "discovery_failed",
+      "completeness_gap_fields": []
+    },
+    {
+      "identity_key": "open-meteo.com",
+      "app_name": "Open-Meteo",
+      "reason_code": "requires_payment",
+      "completeness_gap_fields": [
+        "rate_limit_notes",
+        "pagination_style_hint",
+        "validation_endpoint"
+      ]
+    },
+    {
+      "identity_key": "unresolved:twitter",
+      "app_name": "Twitter",
+      "reason_code": "resolve_ambiguous",
+      "completeness_gap_fields": []
+    },
+    {
+      "identity_key": "unresolved:google-calendar",
+      "app_name": "Google Calendar",
+      "reason_code": "resolve_low_confidence",
+      "completeness_gap_fields": []
+    },
+    {
+      "identity_key": "etsy.com",
+      "app_name": "Etsy",
+      "reason_code": "tos_prohibits_automation",
+      "completeness_gap_fields": [
+        "base_url",
+        "developer_portal_url",
+        "rate_limit_notes",
+        "pagination_style_hint",
+        "validation_endpoint"
+      ]
+    },
+    {
+      "identity_key": "openweathermap.org",
+      "app_name": "OpenWeatherMap",
+      "reason_code": "tos_unverifiable",
+      "completeness_gap_fields": [
+        "base_url",
+        "developer_portal_url",
+        "pagination_style_hint",
+        "validation_endpoint"
+      ]
+    }
+  ],
+  "auto_apps": [
+    "sendgrid.com",
+    "trello.com"
+  ],
+  "unsupported_apps": [
+    "superhuman.com"
+  ]
+}

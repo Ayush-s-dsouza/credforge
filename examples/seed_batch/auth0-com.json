@@ -1,0 +1,56 @@
+{
+  "status": "HITL",
+  "reason_code": "classify_low_confidence",
+  "app": {
+    "app_name": "Auth0",
+    "identity_key": "auth0.com"
+  },
+  "api": {
+    "docs_url": "https://auth0.com/",
+    "base_url": null,
+    "developer_portal_url": "https://auth0.com/docs",
+    "auth_scheme": "oauth2_auth_code",
+    "rate_limit_notes": null,
+    "pagination_style_hint": null,
+    "validation_endpoint": null,
+    "scopes_available": [
+      "openid",
+      "profile",
+      "email"
+    ],
+    "redirect_uris_required": true
+  },
+  "credential": null,
+  "validation": null,
+  "evidence": [
+    {
+      "claim": "resolved identity to auth0.com",
+      "source_url": "https://auth0.com/",
+      "snippet": "Secure users, AI agents, and more with Auth0, an easy-to-implement, scalable, and adaptable authentication and authorization platform."
+    }
+  ],
+  "completeness_gaps": [
+    {
+      "field": "base_url",
+      "reason": "not stated in prose on the crawled page; derivable from concrete endpoint examples elsewhere in the docs"
+    },
+    {
+      "field": "rate_limit_notes",
+      "reason": "not stated in prose on the crawled page; check response headers or a dedicated rate-limits page"
+    },
+    {
+      "field": "pagination_style_hint",
+      "reason": "not stated in prose on the crawled page; derivable from example list-endpoint responses"
+    },
+    {
+      "field": "validation_endpoint",
+      "reason": "not stated in prose on the crawled page; the downstream agent can pick any cheap read-only endpoint from the reference"
+    }
+  ],
+  "provenance": {
+    "run_id": "run_20260730T023149Z_37a0e4fe",
+    "resolved_at": "2026-07-30T02:36:22.324272Z",
+    "emitted_at": "2026-07-30T02:36:51.828429Z",
+    "credforge_version": "0.1.0"
+  }
+}

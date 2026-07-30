@@ -1,0 +1,52 @@
+{
+  "status": "HITL",
+  "reason_code": "classify_low_confidence",
+  "app": {
+    "app_name": "NASA API",
+    "identity_key": "nasa.gov"
+  },
+  "api": {
+    "docs_url": "https://sti.nasa.gov/for-developers/",
+    "base_url": null,
+    "developer_portal_url": "https://sti.nasa.gov/for-developers/",
+    "auth_scheme": "none",
+    "rate_limit_notes": null,
+    "pagination_style_hint": null,
+    "validation_endpoint": null,
+    "scopes_available": [],
+    "redirect_uris_required": false
+  },
+  "credential": null,
+  "validation": null,
+  "evidence": [
+    {
+      "claim": "resolved identity to nasa.gov",
+      "source_url": "https://www.nasa.gov/",
+      "snippet": "NASA.gov brings you the latest news, images and videos from America's space agency, pioneering the future in space exploration, scientific discovery and aeronautics research."
+    }
+  ],
+  "completeness_gaps": [
+    {
+      "field": "base_url",
+      "reason": "not stated in prose on the crawled page; derivable from concrete endpoint examples elsewhere in the docs"
+    },
+    {
+      "field": "rate_limit_notes",
+      "reason": "not stated in prose on the crawled page; check response headers or a dedicated rate-limits page"
+    },
+    {
+      "field": "pagination_style_hint",
+      "reason": "not stated in prose on the crawled page; derivable from example list-endpoint responses"
+    },
+    {
+      "field": "validation_endpoint",
+      "reason": "not stated in prose on the crawled page; the downstream agent can pick any cheap read-only endpoint from the reference"
+    }
+  ],
+  "provenance": {
+    "run_id": "run_20260730T023149Z_37a0e4fe",
+    "resolved_at": "2026-07-30T02:40:57.744028Z",
+    "emitted_at": "2026-07-30T02:41:42.212250Z",
+    "credforge_version": "0.1.0"
+  }
+}

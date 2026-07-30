@@ -1,0 +1,35 @@
+{
+  "status": "HITL",
+  "reason_code": "resolve_ambiguous",
+  "app": {
+    "app_name": "Twitter",
+    "identity_key": "unresolved:twitter"
+  },
+  "api": null,
+  "credential": null,
+  "validation": null,
+  "evidence": [
+    {
+      "claim": "candidate considered: twmate.com (confidence 0.63)",
+      "source_url": "https://twmate.com/",
+      "snippet": "1. Enter the official Twitter website using your web browser and find the desired tweet."
+    },
+    {
+      "claim": "candidate considered: twitter.com (confidence 0.60)",
+      "source_url": "https://twitter.com/i/flow/login",
+      "snippet": "Twitter web sitesine."
+    },
+    {
+      "claim": "candidate considered: youtube.com (confidence 0.32)",
+      "source_url": "https://www.youtube.com/watch?v=43t7U_9AVaI",
+      "snippet": "Offset [Official Music Video]Gucci Mane46M views • 8 years agoLivePlaylist ()Mix (50+). 8:10."
+    }
+  ],
+  "completeness_gaps": [],
+  "provenance": {
+    "run_id": "run_20260730T023149Z_37a0e4fe",
+    "resolved_at": "2026-07-30T02:34:35.544690Z",
+    "emitted_at": "2026-07-30T02:34:42.226625Z",
+    "credforge_version": "0.1.0"
+  }
+}

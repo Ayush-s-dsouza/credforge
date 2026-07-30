@@ -1,0 +1,35 @@
+{
+  "status": "HITL",
+  "reason_code": "resolve_low_confidence",
+  "app": {
+    "app_name": "Google Calendar",
+    "identity_key": "unresolved:google-calendar"
+  },
+  "api": null,
+  "credential": null,
+  "validation": null,
+  "evidence": [
+    {
+      "claim": "candidate considered: google.com (confidence 0.49)",
+      "source_url": "https://calendar.google.com/",
+      "snippet": "Learn how Google Calendar helps you stay on top of your plans - at home, at work and everywhere in between."
+    },
+    {
+      "claim": "candidate considered: startpack.com (confidence 0.21)",
+      "source_url": "https://startpack.com/developer/google/applications",
+      "snippet": "Official website Official website. UsingCheck this box if you use it. This will improve your recommendation.Online calendar for organizing work and personal time."
+    },
+    {
+      "claim": "candidate considered: hostinger.com (confidence 0.19)",
+      "source_url": "https://www.hostinger.com/in/tutorials/best-wordpress-calendar-plugins/",
+      "snippet": "Sugar Calendar official website.The iCalendar and Google Calendar integration lets site visitors subscribe to event updates. Additionally, the plugin’s code is designed to be developer-friendly for advanced customization."
+    }
+  ],
+  "completeness_gaps": [],
+  "provenance": {
+    "run_id": "run_20260730T023149Z_37a0e4fe",
+    "resolved_at": "2026-07-30T02:33:42.466581Z",
+    "emitted_at": "2026-07-30T02:34:07.101672Z",
+    "credforge_version": "0.1.0"
+  }
+}

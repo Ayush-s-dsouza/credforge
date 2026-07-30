@@ -1,0 +1,25 @@
+{
+  "status": "HITL",
+  "reason_code": "discovery_failed",
+  "app": {
+    "app_name": "Mailgun",
+    "identity_key": "mailgun.com"
+  },
+  "api": null,
+  "credential": null,
+  "validation": null,
+  "evidence": [
+    {
+      "claim": "resolved identity to mailgun.com",
+      "source_url": "https://www.mailgun.com/",
+      "snippet": "Whether you’re looking to send thousands or millions of emails to the inbox, parse incoming messages, or connect your email data to a CRM – Mailgun offers the flexibility and reliability you need to ensure your emails reach their destination, every time."
+    }
+  ],
+  "completeness_gaps": [],
+  "provenance": {
+    "run_id": "run_20260730T023149Z_37a0e4fe",
+    "resolved_at": "2026-07-30T02:38:51.934660Z",
+    "emitted_at": "2026-07-30T02:39:29.380944Z",
+    "credforge_version": "0.1.0"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "status": "UNSUPPORTED",
+  "reason_code": "no_public_api",
+  "app": {
+    "app_name": "Superhuman",
+    "identity_key": "superhuman.com"
+  },
+  "api": {
+    "docs_url": null,
+    "base_url": null,
+    "developer_portal_url": null,
+    "auth_scheme": "no_public_api",
+    "rate_limit_notes": null,
+    "pagination_style_hint": null,
+    "validation_endpoint": null,
+    "scopes_available": [],
+    "redirect_uris_required": false
+  },
+  "credential": null,
+  "validation": null,
+  "evidence": [
+    {
+      "claim": "resolved identity to superhuman.com",
+      "source_url": "https://superhuman.com/",
+      "snippet": "Superhuman is the AI productivity suite that gives you superpowers everywhere you work. So you can be more creative, strategic, and impactful."
+    }
+  ],
+  "completeness_gaps": [],
+  "provenance": {
+    "run_id": "run_20260730T023149Z_37a0e4fe",
+    "resolved_at": "2026-07-30T02:43:22.778010Z",
+    "emitted_at": "2026-07-30T02:43:51.180508Z",
+    "credforge_version": "0.1.0"
+  }
+}

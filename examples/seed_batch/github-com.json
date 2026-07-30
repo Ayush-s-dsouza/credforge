@@ -1,0 +1,48 @@
+{
+  "status": "HITL",
+  "reason_code": "classify_low_confidence",
+  "app": {
+    "app_name": "GitHub",
+    "identity_key": "github.com"
+  },
+  "api": {
+    "docs_url": "https://docs.github.com/en/rest",
+    "base_url": null,
+    "developer_portal_url": "https://docs.github.com/en/rest",
+    "auth_scheme": "oauth2_auth_code",
+    "rate_limit_notes": "You can authenticate to the REST API to access more endpoints and have a higher rate limit.",
+    "pagination_style_hint": null,
+    "validation_endpoint": null,
+    "scopes_available": [],
+    "redirect_uris_required": false
+  },
+  "credential": null,
+  "validation": null,
+  "evidence": [
+    {
+      "claim": "resolved identity to github.com",
+      "source_url": "https://github.com/",
+      "snippet": "Whether you’re scaling your development process or just learning how to code, GitHub is where you belong. Join the world’s most widely adopted developer platform to build the technologies that shape what’s next."
+    }
+  ],
+  "completeness_gaps": [
+    {
+      "field": "base_url",
+      "reason": "not stated in prose on the crawled page; derivable from concrete endpoint examples elsewhere in the docs"
+    },
+    {
+      "field": "pagination_style_hint",
+      "reason": "not stated in prose on the crawled page; derivable from example list-endpoint responses"
+    },
+    {
+      "field": "validation_endpoint",
+      "reason": "not stated in prose on the crawled page; the downstream agent can pick any cheap read-only endpoint from the reference"
+    }
+  ],
+  "provenance": {
+    "run_id": "run_20260730T023149Z_37a0e4fe",
+    "resolved_at": "2026-07-30T02:31:49.661112Z",
+    "emitted_at": "2026-07-30T02:32:32.899215Z",
+    "credforge_version": "0.1.0"
+  }
+}

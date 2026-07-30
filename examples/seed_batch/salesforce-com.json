@@ -1,0 +1,56 @@
+{
+  "status": "HITL",
+  "reason_code": "classify_low_confidence",
+  "app": {
+    "app_name": "Salesforce",
+    "identity_key": "salesforce.com"
+  },
+  "api": {
+    "docs_url": null,
+    "base_url": null,
+    "developer_portal_url": null,
+    "auth_scheme": "oauth2_auth_code",
+    "rate_limit_notes": null,
+    "pagination_style_hint": null,
+    "validation_endpoint": null,
+    "scopes_available": [],
+    "redirect_uris_required": true
+  },
+  "credential": null,
+  "validation": null,
+  "evidence": [
+    {
+      "claim": "resolved identity to salesforce.com",
+      "source_url": "https://www.salesforce.com/",
+      "snippet": "You can learn more about what Salesforce is and what Salesforce does by visiting our official resources. Our cloud-based agentic solutions help you find more leads, close more deals, and provide better service to your customers, all on a single, integrated agentic platform."
+    }
+  ],
+  "completeness_gaps": [
+    {
+      "field": "base_url",
+      "reason": "not stated in prose on the crawled page; derivable from concrete endpoint examples elsewhere in the docs"
+    },
+    {
+      "field": "developer_portal_url",
+      "reason": "not stated in prose on the crawled page"
+    },
+    {
+      "field": "rate_limit_notes",
+      "reason": "not stated in prose on the crawled page; check response headers or a dedicated rate-limits page"
+    },
+    {
+      "field": "pagination_style_hint",
+      "reason": "not stated in prose on the crawled page; derivable from example list-endpoint responses"
+    },
+    {
+      "field": "validation_endpoint",
+      "reason": "not stated in prose on the crawled page; the downstream agent can pick any cheap read-only endpoint from the reference"
+    }
+  ],
+  "provenance": {
+    "run_id": "run_20260730T023149Z_37a0e4fe",
+    "resolved_at": "2026-07-30T02:36:51.833096Z",
+    "emitted_at": "2026-07-30T02:37:33.314508Z",
+    "credforge_version": "0.1.0"
+  }
+}

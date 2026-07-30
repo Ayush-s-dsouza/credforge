@@ -1,0 +1,75 @@
+{
+  "status": "AUTO",
+  "reason_code": "eligible_auto",
+  "app": {
+    "app_name": "Trello",
+    "identity_key": "trello.com"
+  },
+  "api": {
+    "docs_url": "https://developer.atlassian.com/cloud/trello/?",
+    "base_url": null,
+    "developer_portal_url": null,
+    "auth_scheme": "oauth1",
+    "rate_limit_notes": null,
+    "pagination_style_hint": null,
+    "validation_endpoint": null,
+    "scopes_available": [
+      "read",
+      "write",
+      "account"
+    ],
+    "redirect_uris_required": true
+  },
+  "credential": {
+    "credential_type": "oauth2_token_pair",
+    "vault_ref": "vault://trello.com/credential",
+    "console_url": "https://developer.atlassian.com/cloud/trello/?/apps/mock",
+    "email_alias": "credforge+trello-com@example.com"
+  },
+  "validation": {
+    "status": "invalid",
+    "reason_code": "validation_failed_unknown",
+    "http_status_code": null,
+    "checked_url": null
+  },
+  "evidence": [
+    {
+      "claim": "resolved identity to trello.com",
+      "source_url": "https://trello.com/",
+      "snippet": "Discover Trello use cases, productivity tips, best practices for team collaboration, and expert remote work advice."
+    },
+    {
+      "claim": "ToS reviewed; no automation prohibition or gating signal found",
+      "source_url": "https://trello.com/developers/terms",
+      "snippet": "Trello Your browser was unable to load all of Trello's resources. They may have\n        been blocked by your firewall, proxy or browser configuration. Press Ctrl+F5 or Ctrl+Shift+R to have your browse"
+    }
+  ],
+  "completeness_gaps": [
+    {
+      "field": "base_url",
+      "reason": "not stated in prose on the crawled page; derivable from concrete endpoint examples elsewhere in the docs"
+    },
+    {
+      "field": "developer_portal_url",
+      "reason": "not stated in prose on the crawled page"
+    },
+    {
+      "field": "rate_limit_notes",
+      "reason": "not stated in prose on the crawled page; check response headers or a dedicated rate-limits page"
+    },
+    {
+      "field": "pagination_style_hint",
+      "reason": "not stated in prose on the crawled page; derivable from example list-endpoint responses"
+    },
+    {
+      "field": "validation_endpoint",
+      "reason": "not stated in prose on the crawled page; the downstream agent can pick any cheap read-only endpoint from the reference"
+    }
+  ],
+  "provenance": {
+    "run_id": "run_20260730T023149Z_37a0e4fe",
+    "resolved_at": "2026-07-30T02:34:42.234294Z",
+    "emitted_at": "2026-07-30T02:35:24.891211Z",
+    "credforge_version": "0.1.0"
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "status": "HITL",
+  "reason_code": "tos_unverifiable",
+  "app": {
+    "app_name": "OpenWeatherMap",
+    "identity_key": "openweathermap.org"
+  },
+  "api": {
+    "docs_url": null,
+    "base_url": null,
+    "developer_portal_url": null,
+    "auth_scheme": "api_key",
+    "rate_limit_notes": "Start with 1,000 free API calls per day. Scale with pay-as-you-call pricing.",
+    "pagination_style_hint": null,
+    "validation_endpoint": null,
+    "scopes_available": [],
+    "redirect_uris_required": false
+  },
+  "credential": null,
+  "validation": null,
+  "evidence": [
+    {
+      "claim": "resolved identity to openweathermap.org",
+      "source_url": "https://old.openweathermap.org/",
+      "snippet": "Access current weather data for any location on Earth including over 200,000 cities! The data is frequently updated based on the global and local weather models, satellites, radars and a vast network of weather stations. Energy Dashboard. A comprehensive visual tool for the renewable energy sector."
+    }
+  ],
+  "completeness_gaps": [
+    {
+      "field": "base_url",
+      "reason": "not stated in prose on the crawled page; derivable from concrete endpoint examples elsewhere in the docs"
+    },
+    {
+      "field": "developer_portal_url",
+      "reason": "not stated in prose on the crawled page"
+    },
+    {
+      "field": "pagination_style_hint",
+      "reason": "not stated in prose on the crawled page; derivable from example list-endpoint responses"
+    },
+    {
+      "field": "validation_endpoint",
+      "reason": "not stated in prose on the crawled page; the downstream agent can pick any cheap read-only endpoint from the reference"
+    }
+  ],
+  "provenance": {
+    "run_id": "run_20260730T023149Z_37a0e4fe",
+    "resolved_at": "2026-07-30T02:40:07.833643Z",
+    "emitted_at": "2026-07-30T02:40:57.738073Z",
+    "credforge_version": "0.1.0"
+  }
+}

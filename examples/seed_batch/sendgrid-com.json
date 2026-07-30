@@ -1,0 +1,71 @@
+{
+  "status": "AUTO",
+  "reason_code": "eligible_auto",
+  "app": {
+    "app_name": "SendGrid",
+    "identity_key": "sendgrid.com"
+  },
+  "api": {
+    "docs_url": "https://www.twilio.com/docs/sendgrid",
+    "base_url": null,
+    "developer_portal_url": null,
+    "auth_scheme": "api_key",
+    "rate_limit_notes": null,
+    "pagination_style_hint": null,
+    "validation_endpoint": null,
+    "scopes_available": [],
+    "redirect_uris_required": false
+  },
+  "credential": {
+    "credential_type": "oauth2_token_pair",
+    "vault_ref": "vault://sendgrid.com/credential",
+    "console_url": "https://www.twilio.com/docs/sendgrid/apps/mock",
+    "email_alias": "credforge+sendgrid-com@example.com"
+  },
+  "validation": {
+    "status": "invalid",
+    "reason_code": "validation_failed_unknown",
+    "http_status_code": null,
+    "checked_url": null
+  },
+  "evidence": [
+    {
+      "claim": "resolved identity to sendgrid.com",
+      "source_url": "https://status.sendgrid.com/",
+      "snippet": "This site is protected by reCAPTCHA and the Google Privacy Policy and Terms of Service apply. Get webhook notifications whenever SendGrid creates an incident, updates an incident..."
+    },
+    {
+      "claim": "ToS reviewed; no automation prohibition or gating signal found",
+      "source_url": "https://sendgrid.com/legal/developer-terms",
+      "snippet": "SendGrid Email API and Email Marketing Campaigns | Twilio English An icon of a down chevron English An icon of a checkmark French German Japanese Portuguese Spanish Support An icon of a down chevron H"
+    }
+  ],
+  "completeness_gaps": [
+    {
+      "field": "base_url",
+      "reason": "not stated in prose on the crawled page; derivable from concrete endpoint examples elsewhere in the docs"
+    },
+    {
+      "field": "developer_portal_url",
+      "reason": "not stated in prose on the crawled page"
+    },
+    {
+      "field": "rate_limit_notes",
+      "reason": "not stated in prose on the crawled page; check response headers or a dedicated rate-limits page"
+    },
+    {
+      "field": "pagination_style_hint",
+      "reason": "not stated in prose on the crawled page; derivable from example list-endpoint responses"
+    },
+    {
+      "field": "validation_endpoint",
+      "reason": "not stated in prose on the crawled page; the downstream agent can pick any cheap read-only endpoint from the reference"
+    }
+  ],
+  "provenance": {
+    "run_id": "run_20260730T023149Z_37a0e4fe",
+    "resolved_at": "2026-07-30T02:38:05.793871Z",
+    "emitted_at": "2026-07-30T02:38:51.927651Z",
+    "credforge_version": "0.1.0"
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "status": "HITL",
+  "reason_code": "requires_payment",
+  "app": {
+    "app_name": "Open-Meteo",
+    "identity_key": "open-meteo.com"
+  },
+  "api": {
+    "docs_url": "https://open-meteo.com/en/docs",
+    "base_url": "/v1/forecast",
+    "developer_portal_url": "https://open-meteo.com/en/docs",
+    "auth_scheme": "api_key",
+    "rate_limit_notes": null,
+    "pagination_style_hint": null,
+    "validation_endpoint": null,
+    "scopes_available": [],
+    "redirect_uris_required": false
+  },
+  "credential": null,
+  "validation": null,
+  "evidence": [
+    {
+      "claim": "resolved identity to open-meteo.com",
+      "source_url": "https://open-meteo.com/",
+      "snippet": "Open-Meteo provides high-resolution open data ranging from 1 to 11 kilometres from national weather services. With a user-friendly JSON API, integrating weather data has never been easier."
+    },
+    {
+      "claim": "developer docs requires payment for API access",
+      "source_url": "https://open-meteo.com/en/docs",
+      "snippet": "apikey String No Only required to commercial use to access reserved API resources for customers."
+    }
+  ],
+  "completeness_gaps": [
+    {
+      "field": "rate_limit_notes",
+      "reason": "not stated in prose on the crawled page; check response headers or a dedicated rate-limits page"
+    },
+    {
+      "field": "pagination_style_hint",
+      "reason": "not stated in prose on the crawled page; derivable from example list-endpoint responses"
+    },
+    {
+      "field": "validation_endpoint",
+      "reason": "not stated in prose on the crawled page; the downstream agent can pick any cheap read-only endpoint from the reference"
+    }
+  ],
+  "provenance": {
+    "run_id": "run_20260730T023149Z_37a0e4fe",
+    "resolved_at": "2026-07-30T02:41:42.217286Z",
+    "emitted_at": "2026-07-30T02:42:37.333659Z",
+    "credforge_version": "0.1.0"
+  }
+}
