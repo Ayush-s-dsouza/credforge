@@ -112,8 +112,9 @@ async function loadStatus() {
   if (s.live_enabled && s.live_recipe_vendors && s.live_recipe_vendors.length) {
     for (const v of s.live_recipe_vendors) {
       const btn = document.createElement('button');
-      btn.textContent = v;
-      btn.onclick = () => setApp(v);
+      btn.textContent = v.label;
+      btn.title = `passes "${v.domain}" as input -- the real registrable domain, to give RESOLVE its best shot`;
+      btn.onclick = () => setApp(v.domain);
       row.appendChild(btn);
     }
   } else {

@@ -3,9 +3,10 @@
 No pipeline logic lives here -- this calls the exact same
 `pipeline.orchestrator.run_app()` the CLI's `run` command calls, streaming
 its ExplainSink events out over SSE instead of printing them to a
-terminal. Mock provisioning only (no Playwright in this image -- it can't
-complete a real signup from a datacenter IP anyway, and it's 400MB we
-don't want in a web image). See RUNBOOK_MANUAL.md / OPS.md for why.
+terminal. Mock provisioning by default; live provisioning (real Playwright
++ IMAP) only for the small, fixed set of vendors with a registered
+SignupRecipe, chosen per-request and disclosed in the stream -- see
+_matches_live_recipe() below and DECISIONS.md D-042/D-046.
 """
 
 import asyncio
@@ -47,6 +48,11 @@ LIVE_RUN_CAP = int(os.environ.get("LIVE_RUN_CAP", "20"))
 # "which of two pre-built provider bundles do we hand to the same run_app,"
 # never a second RESOLVE.
 _LIVE_RECIPE_KEYWORDS = {"nasa": "NASA API", "openweathermap": "OpenWeatherMap", "openweather": "OpenWeatherMap"}
+# The literal registrable domain, not the display label -- passing this
+# directly as RESOLVE's input avoids a real, known failure mode where a
+# generic name search lands on the wrong domain (NASA API -> sti.nasa.gov
+# instead of api.nasa.gov). A legitimate input choice, not a pipeline bypass.
+_LIVE_RECIPE_DOMAINS = {"NASA API": "nasa.gov", "OpenWeatherMap": "openweathermap.org"}
 
 
 def _matches_live_recipe(app_name: str) -> str | None:
@@ -176,7 +182,10 @@ def status() -> dict:
         "live_run_cap": LIVE_RUN_CAP,
         "live_runs_remaining": max(0, LIVE_RUN_CAP - _read_json_counter(LIVE_COUNTER_PATH)),
         "live_enabled": _live_enabled,
-        "live_recipe_vendors": sorted(set(_LIVE_RECIPE_KEYWORDS.values())),
+        "live_recipe_vendors": [
+            {"label": label, "domain": _LIVE_RECIPE_DOMAINS.get(label, label)}
+            for label in sorted(set(_LIVE_RECIPE_KEYWORDS.values()))
+        ],
         "search_provider": "brave" if settings.brave_api_key else "ddg",
     }
 
