@@ -19,7 +19,7 @@ from ..pipeline.explain import NULL_EXPLAIN, ExplainEvent, ExplainSink
 from ..pipeline.orchestrator import run_app
 from ..pipeline.report import RunReport, generate_report
 from ..pipeline.resolve import resolve as resolve_stage
-from ..providers.factory import build_providers
+from ..providers.factory import ProviderBundle, build_providers
 from ..redaction import scrub_secrets
 from ..registry.identity import unresolved_identity_key
 from ..registry.store import AppendOnlyRegistry
@@ -129,6 +129,40 @@ def run(
     console.print_json(artifact.model_dump_json())
 
 
+async def _run_batch(
+    app_names: list[str],
+    *,
+    already_done: set[str],
+    providers: ProviderBundle,
+    settings: Settings,
+    registry: AppendOnlyRegistry,
+    run_id: str,
+    vault: FernetVault | None,
+    dry_run: bool,
+    live: bool,
+    explain: ExplainSink,
+) -> None:
+    for i, app_name in enumerate(app_names, start=1):
+        if app_name in already_done:
+            console.print(f"[{i}/{len(app_names)}] {app_name} ... [dim]skipped (already completed)[/dim]")
+            continue
+        console.print(f"[{i}/{len(app_names)}] {app_name} ...", end=" ")
+        try:
+            state, artifact = await run_app(
+                app_name, providers=providers, settings=settings, registry=registry, run_id=run_id,
+                data_dir=settings.data_dir, vault=vault, dry_run=dry_run, live=live,
+                explain=explain,
+            )
+        except Exception as exc:  # one app's crash never stops the batch
+            console.print(f"[red]ERROR[/red] {type(exc).__name__}: {exc}")
+            continue
+
+        if artifact is None:
+            console.print("[yellow]stopped before GATE[/yellow]")
+        else:
+            console.print(f"{artifact.status.value} / {artifact.reason_code.value}")
+
+
 @app.command()
 def batch(
     csv_path: Path,
@@ -155,27 +189,21 @@ def batch(
         if e.stage == PipelineStage.EMIT and e.stage_status == StageStatus.COMPLETED
     }
 
-    for i, app_name in enumerate(app_names, start=1):
-        if app_name in already_done:
-            console.print(f"[{i}/{len(app_names)}] {app_name} ... [dim]skipped (already completed)[/dim]")
-            continue
-        console.print(f"[{i}/{len(app_names)}] {app_name} ...", end=" ")
-        try:
-            state, artifact = asyncio.run(
-                run_app(
-                    app_name, providers=providers, settings=settings, registry=registry, run_id=run_id,
-                    data_dir=settings.data_dir, vault=vault, dry_run=dry_run, live=live,
-                    explain=_explain_sink(explain),
-                )
-            )
-        except Exception as exc:  # one app's crash never stops the batch
-            console.print(f"[red]ERROR[/red] {type(exc).__name__}: {exc}")
-            continue
-
-        if artifact is None:
-            console.print("[yellow]stopped before GATE[/yellow]")
-        else:
-            console.print(f"{artifact.status.value} / {artifact.reason_code.value}")
+    # One event loop for the entire batch, not one per app (D-050): the
+    # providers built above -- specifically HttpxFetchProvider's single
+    # shared httpx.AsyncClient -- are constructed once and reused across
+    # every app. A fresh `asyncio.run()` per app tears down and recreates
+    # the event loop each time, and httpx's connection pool is bound to
+    # whichever loop was active on its first real request; reusing it from
+    # a *new* loop on the next app raises "RuntimeError: Event loop is
+    # closed" -- found live, mid-batch, non-deterministically (it depends
+    # on real connection-pool timing, not every app triggers it).
+    asyncio.run(
+        _run_batch(
+            app_names, already_done=already_done, providers=providers, settings=settings, registry=registry,
+            run_id=run_id, vault=vault, dry_run=dry_run, live=live, explain=_explain_sink(explain),
+        )
+    )
 
     report = generate_report(run_id, data_dir=settings.data_dir)
     console.print(f"\nrun_id: {run_id}")

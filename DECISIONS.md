@@ -2330,3 +2330,172 @@ actually needs it, rather than true only by accident of how
 label-substring matching starts producing false positives on unrelated
 app names -- worth switching to an explicit alias list per recipe at that
 point, not a larger blocklist bolted onto the substring check.
+
+### D-049: Three-tier source authority in docs-candidate ranking, and why authority lives there, not in CLASSIFY
+
+**Decided:** `pipeline/source_authority.py` classifies any docs-candidate
+URL into HIGH (an official API reference -- path segment `api`,
+`reference`, `api-reference`, or `rest`, or a `developer(s).*` subdomain),
+MEDIUM (general docs/guide -- path segment `docs`, `guide`, `guides`, or a
+`docs.*` subdomain), or LOW (everything else: blogs, tutorials,
+third-party write-ups, forums, Stack Overflow, Medium). Two call sites:
+
+1. `resolve.py::_rank_and_verify_docs_candidates` sorts candidates by tier
+   (`tier_sort_key`, a *stable* sort -- within a tier, whatever order
+   candidates arrived in, i.e. search rank then conventional guesses,
+   still applies) before fetching/verifying any of them. This replaces
+   the old `_docs_signal_score`, a flat two-level "developer/docs/api
+   signal present or not" that scored a Trailhead tutorial and a real API
+   reference identically the moment neither had a negative signal
+   (`help`/`support`/etc.). The winning URL's `docs_url_reason` now names
+   the specific tier and matched signal (`"HIGH-tier (path segment
+   'rest')"`), and -- a real, separate bug fixed in the same pass --
+   this reason was being computed all along and never once surfaced in
+   the final artifact; `emit.py` now adds a real evidence item for it.
+2. `classify.py` computes the tier fresh from whichever `docs_url`
+   DISCOVER actually used (which can differ from RESOLVE's top pick,
+   D-028's fallback), and applies a real, asymmetric adjustment to the
+   extractor's raw confidence before comparing it to
+   `CONFIDENCE_THRESHOLD`: HIGH +0.05, MEDIUM +0.0, LOW -0.15. `source_tier`
+   is recorded on `ClassifyResult` and surfaced on the artifact's
+   `ApiInfo` so a downstream consumer can tell a HIGH-tier-derived 0.6
+   apart from a LOW-tier-derived 0.6 -- previously indistinguishable in
+   the artifact, which was the actual bug this exists to fix.
+
+**Measured, real seed-batch effect** (`run_20260801T084914Z_04685c6b`
+against the previously-measured `run_20260730T170035Z_4a8d3af4`; full
+before/after table in README.md): `classify_low_confidence` went from 8
+apps to 4 -- Monday.com, Stripe, and Trello moved straight to AUTO;
+Spotify moved to a real, evidence-backed `requires_payment` GATE finding.
+AUTO went from 2 apps to 6. Of the 16 apps that reached a real docs page
+this run, 12 landed HIGH-tier, 3 MEDIUM, 1 LOW (Salesforce, on DISCOVER's
+own bare-domain fallback -- correctly penalized, since a marketing
+homepage genuinely isn't a docs page). Zero regressions found checking
+all 20 apps individually -- no app moved from a better-informed status to
+a worse one. Caveat stated as plainly as the result: several other
+apps that changed between these two runs (Discord, Etsy, Google Calendar,
+Mailgun) did so at the RESOLVE *identification* step, a code path this
+decision never touches -- those are pre-existing search-provider
+non-determinism (see OPS.md's "Run-to-run coverage volatility"), not an
+effect of source-authority weighting, and are not counted among the
+results above.
+
+**Why authority lives in ranking, not in CLASSIFY:** by the time CLASSIFY
+reads a page, the wrong page has already been chosen -- no amount of
+downstream distrust of a confidently-written tutorial recovers a docs
+candidate that should never have outranked the real reference in the
+first place. Fixing this in CLASSIFY alone (e.g. "distrust tutorial-
+flavored prose") would still let a genuinely well-written, wrong page win
+the ranking and get read; fixing it in ranking means the right page gets
+picked more often, which is strictly more valuable than making CLASSIFY
+merely more suspicious of whatever it's handed. CLASSIFY's own tier-aware
+confidence adjustment (item 2 above) exists as a second, independent
+safety net for the residual case -- ranking picked the best *available*
+candidate, but that candidate still turned out to be LOW-tier because
+nothing better existed -- not as a substitute for fixing the ranking
+itself.
+
+**The tradeoff, named plainly:** a HIGH-tier page that's sparse (real,
+minimal endpoint reference, thin on prose) will still outrank a MEDIUM or
+LOW-tier page that's rich (a detailed, well-written tutorial covering the
+same ground more thoroughly) -- tier is about the URL's *shape* and what
+that shape structurally implies about the page's role, not the page's
+actual information density, which ranking has no way to measure ahead of
+a real fetch. This is a deliberate bet: a thin official reference is
+still more likely to be *correct* about auth scheme, endpoints, and
+scopes than a thorough unofficial writeup is, even when the writeup reads
+better. `_looks_like_api_docs`'s content-verification check (unchanged
+by this decision) still rejects a HIGH-tier candidate outright if its
+actual content doesn't look like API documentation at all -- tier ranks
+among candidates that already passed that bar, it doesn't replace it.
+
+**Rejected: scoring authority as a continuous function of matched-signal
+count, not three discrete tiers.** A URL matching both a `developer.*`
+subdomain and a `/reference/` path isn't meaningfully more authoritative
+than one matching only one of those -- both are clearly official
+references. Discrete tiers avoid manufacturing false precision (a score
+of "3" vs "2" implying a confidence gradient the URL shape alone can't
+actually support) and keep the ranking auditable in plain language
+(`docs_url_reason` names one tier and one matched signal, not a composite
+number).
+
+**Rejected: applying the same numeric adjustment symmetrically (e.g.
+HIGH +0.15, LOW -0.15).** The chosen asymmetry (+0.05 / +0.0 / -0.15) is
+deliberate: a HIGH-tier source earns only a small reward, because ranking
+should already be steering most real cases there -- CLASSIFY's job isn't
+to further reward what ranking already got right. A LOW-tier source takes
+the real, threshold-crossing penalty, because that's the actual failure
+mode this whole decision exists to fix: a confidently-extracted tutorial
+passing the same bar as a confidently-extracted reference. Rewarding HIGH
+as heavily as LOW is penalized would just re-inflate confidence for
+everything, which isn't the problem being solved.
+
+**Rejected: `"api.*"` as an automatic HIGH-tier subdomain signal.** Common
+real shape: `api.<vendor>.com` is often the API *endpoint* domain
+(`base_url`), not a docs page -- NASA's `api.nasa.gov` happens to serve
+both, but that's a coincidence of one vendor's setup, not a pattern to
+generalize from. Only an explicit path segment (`/api/`) or the
+`developer(s).*` subdomain earn HIGH on their own.
+
+**Revisit if:** the confidence-adjustment magnitudes turn out too weak or
+too aggressive once measured against a larger, more diverse app set than
+the 20-app seed list -- these are principled starting values (asymmetric
+by design, see above), not independently tuned against real classification
+outcomes at scale.
+
+### D-050: `batch` runs the whole batch inside one event loop, not one `asyncio.run()` per app
+
+**Decided:** `cli/__init__.py::batch()` now wraps the entire per-app loop
+in a single `asyncio.run(_run_batch(...))` call, instead of calling
+`asyncio.run(run_app(...))` fresh inside the loop for every app.
+
+**Found live, re-running the seed batch to measure D-049:** app 16 of 20
+crashed with `RuntimeError: Event loop is closed`, non-deterministically
+(the same batch had run cleanly through 15 apps first). Root cause: the
+`ProviderBundle` built once, before the loop, holds one
+`HttpxFetchProvider` with one shared `httpx.AsyncClient` -- httpx binds a
+client's connection pool to whichever event loop is running on its first
+real request. The old code created and destroyed a *new* event loop every
+iteration (`asyncio.run()` inside the `for` loop); the shared client's
+pool, bound to app 1's loop, becomes invalid the moment that loop closes,
+and reusing it from app 2's (new) loop raises exactly this error --
+timing-dependent on real connection-pool state, which is why it didn't
+reproduce on every run.
+
+**Rejected: building a fresh `ProviderBundle` (and therefore a fresh
+httpx client) for every app instead.** Would work, but throws away
+keep-alive connection reuse across apps for no reason -- the actual bug
+is calling `asyncio.run()` per app at all, not that providers are shared.
+One event loop for the whole batch is both the correct fix and a real,
+if secondary, performance win (no repeated event-loop startup/teardown).
+
+**Rejected: leaving `run()` (single-app) and `resolve()` (single-app)
+untouched.** Already correct -- each already calls `asyncio.run()`
+exactly once for the one app they process; only `batch()`'s per-iteration
+pattern was wrong.
+
+### D-051: RESOLVE's docs-URL search now degrades on provider failure, the same way its identification search already did
+
+**Decided:** `_collect_docs_candidate_urls()` (the *second* search RESOLVE
+issues, looking for developer docs once a company identity is already
+confirmed) now catches `SearchProviderError` per query template and
+continues with conventional-guess URLs only, instead of letting the
+exception propagate out of `resolve()` entirely.
+
+**Found in the same batch re-run as D-050:** a different app crashed with
+an uncaught `SearchProviderError` from `search.search(query, count=8)`
+inside docs-URL discovery -- DDG genuinely timed out against Mojeek's
+backend. `resolve()`'s *first* search call (`"<app> official website"`)
+already has exactly this fallback (D-024's `SearchProviderError` split
+and `_resolve_via_search_failure_fallback`), but that protection never
+covered the second, later search call docs-URL discovery makes -- an
+oversight in D-024's original scope, not a new failure mode.
+
+**Effect on the batch harness specifically:** `batch()`'s outer
+`except Exception` already prevents one app's crash from stopping the
+whole batch (D-036) -- but "caught by the outer handler" still meant
+zero artifact, zero registry entry, and the app silently missing from
+`report.json`'s counts, exactly the class of measurement-integrity bug
+D-038/D-039 exist to prevent one stage earlier. Degrading gracefully
+inside `resolve()` itself, so every app still reaches EMIT, is the
+correct fix, not a wider try/except further out.

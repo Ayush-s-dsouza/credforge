@@ -14,7 +14,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ..enums import AuthScheme, CredentialType, ReasonCode, Status
+from ..enums import AuthScheme, CredentialType, ReasonCode, SourceTier, Status
 from ..providers.browser import ProvisionStepResult
 from ..providers.llm import DiscoveryExtraction
 
@@ -53,7 +53,12 @@ class ClassifyResult(BaseModel):
     auth_scheme: AuthScheme | None = None  # None only if the extractor's answer was unparseable
     redirect_uris_required: bool = False
     scopes_available: list[str] = Field(default_factory=list)
+    # The *adjusted* confidence -- source-tier weighting (D-049) already
+    # applied, not the extractor's raw number. source_tier records which
+    # tier drove that adjustment, so a consumer can tell a 0.6 earned from
+    # an official reference apart from a 0.6 dragged down from a blog post.
     confidence: float = 1.0
+    source_tier: SourceTier | None = None  # None only when DISCOVER found no public API at all
 
 
 class EvidenceItem(BaseModel):

@@ -17,108 +17,141 @@ it's what a downstream toolkit-generation agent consumes to actually
 build the integration, without needing to re-derive any of the research
 that went into it.
 
-## Measured coverage — real seed batch, `run_20260730T170035Z_4a8d3af4`
+## Measured coverage — real seed batch, `run_20260801T084914Z_04685c6b`
 
 **These are measured counts from one real run of `credforge batch
 data/seed_apps.csv` against the live internet — real DuckDuckGo search,
 real HTTP fetches, real `claude-sonnet-5` extraction, mocked (non-`--live`)
 provisioning. Nothing below is projected or estimated; every count below
-is read directly from this run's 20 artifact files and `report.json`.**
-
-**Read this table with the volatility callout below it, not instead of
-it.** A second full batch run, same code, same seed list, produced
-materially different numbers for several apps for reasons that trace to
-the search provider and LLM extraction, not to credforge's own logic —
-see "What it gets wrong" for the full reproducibility investigation
-before treating any single number here as a stable measurement of vendor
-behavior.
+is read directly from this run's 20 artifact files and `report.json`.
+This is the first canonical run since source-authority weighting (D-049)
+landed — see the before/after table right below for exactly what moved
+and why, and "What it gets wrong" for the standing volatility caveat
+that still applies to any single run's numbers.**
 
 | status | count | share |
 |---|---|---|
-| AUTO | 2 | 10% |
-| HITL | 15 | 75% |
-| UNSUPPORTED | 3 | 15% |
+| AUTO | 6 | 30% |
+| HITL | 12 | 60% |
+| UNSUPPORTED | 2 | 10% |
 
-All 20 seed apps produced a real artifact in this run — including every
-app that failed at RESOLVE — so this table's total is exactly
-`report.json`'s `total_apps: 20`, no reconciliation against CLI console
-output needed (D-038/D-039).
+All 20 seed apps produced a real artifact in this run, matching
+`report.json`'s `total_apps: 20` exactly (D-038/D-039) — this run also
+fixed two real crashes (D-050, D-051) that would otherwise have dropped
+apps from the count; see below.
 
-**The HITL bucket splits into two categories that mean very different
-things, and collapsing them into one number hides the one that actually
-matters:**
+**VENDOR_BLOCKED / PIPELINE_LIMITED split:**
 
 | category | count | what it means |
 |---|---|---|
-| **VENDOR_BLOCKED** — irreducible, a human must act | **0** | the vendor's own policy requires payment, business/phone verification, a CAPTCHA, SSO-only signup, or explicitly prohibits automation |
-| **PIPELINE_LIMITED** — reducible, credforge just couldn't confirm | **10** | the vendor doesn't require a human here — credforge's own detection ran out of confidence or coverage before it could say so |
+| **VENDOR_BLOCKED** — irreducible, a human must act | **2** | OpenWeatherMap, Spotify — both `requires_payment`, both with real quoted evidence, both found on the vendor's real official docs page |
+| **PIPELINE_LIMITED** — reducible, credforge just couldn't confirm | **9** | `classify_low_confidence` (4: Auth0, HubSpot, Salesforce, Slack), `discovery_failed` (1: Mailgun), `tos_unverifiable` (4: Etsy, Google Calendar, Notion, Open-Meteo) |
 
-**That "0" is this run's real, literal count — and it is also
-demonstrably not a reliable measurement of how often vendors actually
-block.** Re-running three of this run's non-VENDOR_BLOCKED apps in
-isolation immediately surfaced real, evidence-backed vendor blocks the
-batch missed:
+Real evidence for both VENDOR_BLOCKED apps, both found because
+source-authority weighting picked the *right* page:
 
-- **Etsy** landed on `resolve_not_found` in this run. Re-run alone
-  moments later: `tos_prohibits_automation`, with developers.etsy.com's
-  own docs quoted directly: *"Applications must not sidestep the API to
-  retrieve or post Etsy data. Screen-scraping is not allowed."*
-- **OpenWeatherMap** landed on `discovery_failed` in this run (and in a
-  second full batch run — see below). Re-run alone, five separate times:
-  five real VENDOR_BLOCKED results (`requires_payment` x2,
-  `requires_sales_contact` x2, `tos_unverifiable` x1), zero failures.
-- **Open-Meteo** landed on `tos_unverifiable` in this run (and in a
-  second batch run too). An earlier real run landed on `requires_payment`
-  with open-meteo.com's own docs quoted: *"apikey ... Only required to
-  commercial use to access reserved API resources for customers."*
+- **OpenWeatherMap** (`openweathermap.org/api`, recipe-pinned, D-048) —
+  *"Included in the Developer, Professional and Expert subscription
+  plans."*
+- **Spotify** (`developer.spotify.com`, HIGH-tier) — *"Note: You need a
+  Spotify Premium account to use the Web API."*
 
-PIPELINE_LIMITED, by reason code, this run:
+Plus 1 app that stopped at RESOLVE before DISCOVER or GATE ever ran, counted
+inside the HITL total: `resolve_ambiguous` (Twitter).
 
-- `classify_low_confidence` (8): Auth0, HubSpot, Monday.com, Salesforce,
-  Slack, Spotify, Stripe, Trello
-- `discovery_failed` (1): OpenWeatherMap
-- `tos_unverifiable` (1): Open-Meteo
+**AUTO (6, up from 2): GitHub, SendGrid, Discord, Monday.com, Stripe,
+Trello — all `eligible_auto`.** Three of these (Discord, Monday.com,
+Trello) were checked for "would 1d's live-recipe bar apply" and rejected
+on real evidence, not skipped — see "What I'd build next."
 
-Plus 5 apps that stopped at RESOLVE, before DISCOVER or GATE ever ran —
-counted inside the HITL total above, not a separate bucket, since all
-five produced real HITL artifacts: `resolve_not_found` (Discord, Etsy),
-`resolve_low_confidence` (Google Calendar, Mailgun), `resolve_ambiguous`
-(Twitter).
+**UNSUPPORTED (2): NASA API, Superhuman — both `no_public_api`.**
 
-**AUTO: GitHub, SendGrid (both `eligible_auto`).**
+**The honest metric: of 12 apps a human was asked to look at, 2 (16.7%)
+actually needed one** — both with a real, specific, quoted reason. That's
+a materially more informative number than the previous run's "0 of 15"
+headline, and it's more informative for a real, traceable reason: the
+same fix that moved `classify_low_confidence` also let GATE read the
+*correct* page for OpenWeatherMap and Spotify, where the wrong page
+previously hid a real payment requirement behind `discovery_failed` /
+`classify_low_confidence` respectively.
 
-**UNSUPPORTED (3, up from 1): NASA API, Notion, Superhuman — all
-`no_public_api`.** NASA landing here is a direct, verified effect of
-today's fix, not a coincidence — see "What it gets wrong."
+### Source-authority weighting: before vs after, full 20-app table
 
-**The honest metric this run points to — "of 15 apps a human was asked to
-look at, 0 actually needed one" — is real but misleading on its own,**
-because it's built from a run whose own reason codes for exactly the
-apps that would answer this question (Etsy, Open-Meteo, OpenWeatherMap)
-are shown above to be unstable. The truer statement, backed by repeated
-real runs: **at least 3 of these 20 vendors have a real, quotable,
-evidence-backed policy blocking automation** — this run's batch execution
-simply didn't land on all three at once. Fail-closed toward HITL is still
-the correct default (a false `AUTO` hands a downstream agent a
-credential-shaped promise that doesn't exist — see the Spotify soft-404
-below), but "the coverage table" as a single-run snapshot is a weaker
-instrument than this project has previously presented it as.
+Before: `run_20260730T170035Z_4a8d3af4` (previously measured, cited
+above in earlier revisions of this doc). After:
+`run_20260801T084914Z_04685c6b`. Every row checked individually for
+regressions — **zero found**: no app moved from a better-informed status
+to a worse one.
 
-**Which single fix would move `classify_low_confidence` most:**
-source-authority weighting on docs candidates (see "what's next") —
-CLASSIFY reading a landing/table-of-contents page instead of a detailed
-reference page, the same failure mode as Salesforce's Trailhead-tutorial
-misread (see "what it gets wrong"). `classify_low_confidence` is 8 of the
-10 PIPELINE_LIMITED apps this run — still the dominant cause, though the
-exact count moves between runs (11 in the previous measured run).
+| app | before | after | moved because of D-049? |
+|---|---|---|---|
+| Auth0 | HITL / classify_low_confidence | *(same)* | — |
+| Discord | HITL / resolve_not_found | **AUTO** / eligible_auto | No — RESOLVE identification succeeded this run; that code path is untouched by D-049 (search-provider variance) |
+| Etsy | HITL / resolve_not_found | HITL / tos_unverifiable | No — same reason as Discord |
+| GitHub | AUTO / eligible_auto | *(same)* | — |
+| Google Calendar | HITL / resolve_low_confidence | HITL / tos_unverifiable | No — same reason as Discord |
+| HubSpot | HITL / classify_low_confidence | *(same)* | — |
+| Mailgun | HITL / resolve_low_confidence | HITL / discovery_failed | No — same reason as Discord |
+| Monday.com | HITL / classify_low_confidence | **AUTO** / eligible_auto | **Yes** — resolved successfully in both runs; only docs-ranking/confidence changed |
+| NASA API | UNSUPPORTED / no_public_api | *(same)* | Recipe-pinned (D-048), not D-049 |
+| Notion | UNSUPPORTED / no_public_api | HITL / tos_unverifiable | **Yes** — resolved in both runs; D-049 found `developers.notion.com` (HIGH-tier) where DISCOVER previously missed a real API entirely |
+| Open-Meteo | HITL / tos_unverifiable | *(same)* | — |
+| OpenWeatherMap | HITL / discovery_failed | HITL / **requires_payment** | Ambiguous — recipe-pinned domain unchanged by D-049; likely the same batch-position fetch issue named below, not tier ranking |
+| Salesforce | HITL / classify_low_confidence | *(same, now explicitly LOW-tier)* | **Yes**, confirmed — only real docs candidate is DISCOVER's own bare-domain fallback, correctly scored LOW |
+| SendGrid | AUTO / eligible_auto | *(same)* | — |
+| Slack | HITL / classify_low_confidence | *(same, now explicitly MEDIUM-tier)* | **Yes**, confirmed via `source_tier` |
+| Spotify | HITL / classify_low_confidence | HITL / **requires_payment** | **Yes** — resolved in both runs; HIGH-tier `developer.spotify.com` is what surfaced the real payment requirement |
+| Stripe | HITL / classify_low_confidence | **AUTO** / eligible_auto | **Yes** — resolved in both runs; `docs.stripe.com/api`, HIGH-tier |
+| Superhuman | UNSUPPORTED / no_public_api | *(same)* | — |
+| Trello | HITL / classify_low_confidence | **AUTO** / eligible_auto | **Yes** — resolved in both runs; `developer.atlassian.com`, HIGH-tier |
+| Twitter | HITL / resolve_ambiguous | *(same)* | — |
 
-**The original seed list's own predicted outcomes (in the build plan)
-continue to turn out wrong for a majority of apps, run to run, not just
-once** — Superhuman is the one seed prediction that has now held twice
-running (`UNSUPPORTED`/`no_public_api`, both this run and the prior
-measured one); everything else has landed differently across the two
-most recent real runs alone, which is itself the volatility finding
-below, not a separate story per app.
+**Headline result:** `classify_low_confidence` went from 8 apps to 4
+(Auth0, HubSpot, Salesforce, Slack) — halved. 3 apps
+(Monday.com, Stripe, Trello) moved straight from `classify_low_confidence`
+to AUTO; 1 (Spotify) moved to a real VENDOR_BLOCKED finding instead of a
+low-confidence guess. AUTO went from 2 apps to 6.
+
+**Confidence distribution, real and measured from this run's actual
+`docs_url` values (`source_tier` on every artifact's `api` block):** of
+the 16 apps that reached a real docs page, **12 HIGH-tier, 3 MEDIUM-tier,
+1 LOW-tier**. Per D-049's adjustment (+0.05 / +0.0 / −0.15 respectively),
+that's 12 apps whose raw confidence was nudged up slightly, 3 unchanged,
+and 1 (Salesforce) penalized enough to matter. **Stated honestly, not
+rounded up:** the artifact schema never exposed CLASSIFY's raw confidence
+number before this fix (only `auth_scheme` and `reason_code` were
+visible) — a `classify_confidence` field was added alongside `source_tier`
+in this same change, but neither this run nor the prior one has it
+populated on disk (both predate or coincide with the field's addition).
+The tier counts above are real, on-disk, verified data; exact
+before/after confidence *floats* per app are not — `tests/pipeline/test_classify.py`'s
+`test_the_same_raw_confidence_is_distinguishable_by_source_tier` is
+where the exact adjustment math (0.6 → 0.65 / 0.6 / 0.45) is proven
+directly instead.
+
+**Two real bugs found and fixed re-running this batch, neither caused by
+D-049 itself (see DECISIONS.md D-050, D-051):** `batch` used to open a
+fresh event loop per app while sharing one HTTP client across all of
+them, which crashed with `RuntimeError: Event loop is closed`
+non-deterministically once the client's connection pool outlived the
+loop it was created on. Separately, RESOLVE's *docs-URL* search (as
+opposed to its already-protected identification search, D-024) had no
+`SearchProviderError` fallback at all, and a real DDG timeout crashed
+that app's whole run with zero artifact. Both are now fixed; this run is
+clean, 20/20, no crashes.
+
+**OpenWeatherMap's `discovery_failed`→`requires_payment` move is flagged
+"ambiguous" above on purpose:** its recipe-pinned domain and docs_url are
+completely unchanged by D-049 (recipe-pinning short-circuits past
+docs-ranking entirely, D-048), so this specific move is most likely the
+same batch-position-dependent fetch issue diagnosed in the previous
+measured run (isolated re-runs of OpenWeatherMap succeed reliably; deep
+in a 20-app sequential batch, this one candidate sometimes doesn't) —
+not a D-049 effect, even though it looks like one at a glance.
+
+**The original seed list's own predicted outcomes continue to turn out
+wrong for most apps** — Superhuman remains the one seed prediction that
+has now held across three real runs (`UNSUPPORTED`/`no_public_api`).
 
 ## What it gets wrong
 
@@ -171,16 +204,19 @@ below, not a separate story per app.
   httpx's connection handling over a long sequential run. Both are real,
   current, unresolved gaps, not swept into the coverage table's "0
   VENDOR_BLOCKED" without comment.
-- **CLASSIFY's confidence score measures how clearly the extraction task
-  could be done, not whether the answer is actually correct.** A page can
-  state an auth scheme in unambiguous prose and still be the wrong page
-  to learn the real flow from. In one real trace, Salesforce's extraction
-  confidently returned `oauth2_client_credentials` — pulled from a
-  Trailhead *tutorial* page, not Salesforce's actual API reference. High
-  confidence there means "the tutorial was clearly written," not "this is
-  definitely how the production integration authenticates." Nothing in
-  the current pipeline separates "confidently read" from "read from an
-  authoritative source" — see "what's next."
+- **Source-authority weighting (D-049) fixes the Salesforce-Trailhead
+  class of bug, but only at the URL-shape level, not the content level.**
+  CLASSIFY's raw confidence still measures how clearly the extraction
+  task could be done, not whether the answer is correct — D-049 doesn't
+  change that, it changes *which page* CLASSIFY is likely to be handed in
+  the first place (a real `developer.*`/`/reference/` URL now consistently
+  outranks a tutorial-shaped one), and penalizes confidence when only a
+  LOW-tier page was available at all. What it still can't catch: a
+  genuinely HIGH-tier-shaped URL (`developer.example.com/tutorials/...`)
+  whose actual content is a tutorial anyway — tier is a structural proxy
+  for authority, not a content read. `_looks_like_api_docs`'s existing
+  content-verification check still runs first and is unchanged by this
+  fix.
 - **The default search provider (no-key `ddgs`/DuckDuckGo) trades
   reliability for zero billing setup.** It throttles unpredictably and
   has no documented rate-limit contract, unlike Brave's paid API — this
@@ -203,17 +239,26 @@ below, not a separate story per app.
 
 ## What I'd build next
 
-- **Source-authority weighting on docs candidates.** Right now a docs
-  candidate is accepted or rejected by content pattern-matching alone
-  (D-027) — a marketing page with enough incidental API vocabulary can
-  pass the same bar as an actual reference page. The Salesforce-Trailhead
-  case above is exactly this failure mode one layer downstream, in
-  CLASSIFY instead of DISCOVER. Weighting candidates by *where* they live
-  (a `/reference` or `/api-reference` path outranks a `/tutorials` or
-  `/guides` path, a `developer.` subdomain outranks a general docs
-  subdomain) would catch this before CLASSIFY ever sees the wrong page,
-  which is a more durable fix than trying to make CLASSIFY itself
-  distrust tutorial-flavored prose.
+- **Content-aware authority, not just URL-shape authority.** D-049's
+  three tiers are a real, measured improvement (see above), but they're
+  entirely about a URL's *shape* — a HIGH-tier-shaped page with genuinely
+  thin, sparse content still outranks a rich MEDIUM/LOW-tier page (the
+  tradeoff D-049's DECISIONS.md entry names directly). A natural next
+  step: fold a cheap content signal (endpoint-listing density, code-block
+  count) into the ranking alongside tier, so a real reference wins on
+  richness too, not just on where it happens to live.
+- **A CAPTCHA/interstitial signal that reaches GATE, not just PROVISION.**
+  OpenWeatherMap's real reCAPTCHA is invisible to GATE (it only reads ToS
+  prose) and only discovered by PROVISION actually trying — see
+  DECISIONS.md D-046/D-050 and OPS.md's recipe-ability section. Feeding
+  that back into `requires_captcha` before a live attempt is wasted is
+  exactly Task 2's territory (recipe auto-generation would need to detect
+  this at recipe-generation time, not just at submission time).
+- **Investigate why a fetch that succeeds reliably in isolation fails
+  specifically deep in a long sequential batch** (OpenWeatherMap's
+  `discovery_failed`, this run and the last) — named honestly above as
+  unresolved, best current guess is `httpx` connection-pool behavior, not
+  confirmed.
 - **Parallelized subdomain/path probes.** RESOLVE and GATE both issue
   their conventional-guess fetches (docs subdomains, ToS paths)
   sequentially, one at a time, bounded only by the existing per-domain

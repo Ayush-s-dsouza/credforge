@@ -1,6 +1,6 @@
 import pytest
 
-from credforge.enums import AuthScheme, ReasonCode
+from credforge.enums import AuthScheme, ReasonCode, SourceTier
 from credforge.pipeline.classify import classify
 from credforge.providers.llm import ClassifyExtraction, DiscoveryExtraction
 
@@ -78,6 +78,69 @@ async def test_unparseable_auth_scheme_string_is_flagged_not_crashed() -> None:
     )
 
     assert result.auth_scheme is None
+    assert result.reason_code == ReasonCode.CLASSIFY_LOW_CONFIDENCE
+
+
+@pytest.mark.asyncio
+async def test_source_tier_is_recorded_on_the_result() -> None:
+    discovery = DiscoveryExtraction(has_public_api=True)
+    extractor = FakeExtractor(ClassifyExtraction(auth_scheme="api_key", confidence=0.7))
+
+    result = await classify(
+        "example.com", docs_text="x", docs_url="https://developer.example.com/api/reference",
+        discovery=discovery, extractor=extractor,
+    )
+
+    assert result.source_tier == SourceTier.HIGH
+
+
+@pytest.mark.asyncio
+async def test_the_same_raw_confidence_is_distinguishable_by_source_tier() -> None:
+    # D-049, the actual bug: a 0.6 from an official reference and a 0.6
+    # from a tutorial used to be indistinguishable in the artifact. Same
+    # raw extractor confidence, three different docs_url shapes -- the
+    # *adjusted* confidence and reason_code must differ.
+    discovery = DiscoveryExtraction(has_public_api=True)
+
+    high = await classify(
+        "example.com", docs_text="x", docs_url="https://example.com/api/reference",
+        discovery=discovery, extractor=FakeExtractor(ClassifyExtraction(auth_scheme="api_key", confidence=0.6)),
+    )
+    medium = await classify(
+        "example.com", docs_text="x", docs_url="https://docs.example.com/getting-started",
+        discovery=discovery, extractor=FakeExtractor(ClassifyExtraction(auth_scheme="api_key", confidence=0.6)),
+    )
+    low = await classify(
+        "example.com", docs_text="x", docs_url="https://trailhead.example.com/some-tutorial",
+        discovery=discovery, extractor=FakeExtractor(ClassifyExtraction(auth_scheme="api_key", confidence=0.6)),
+    )
+
+    assert high.source_tier == SourceTier.HIGH
+    assert medium.source_tier == SourceTier.MEDIUM
+    assert low.source_tier == SourceTier.LOW
+
+    assert high.confidence == 0.65  # 0.6 + 0.05
+    assert medium.confidence == 0.6  # unchanged
+    assert low.confidence == 0.45  # 0.6 - 0.15
+
+    # The actual, material consequence: the exact same raw 0.6 clears the
+    # threshold from an official reference, and is flagged from a tutorial.
+    assert high.reason_code is None
+    assert medium.reason_code is None
+    assert low.reason_code == ReasonCode.CLASSIFY_LOW_CONFIDENCE
+
+
+@pytest.mark.asyncio
+async def test_low_tier_penalty_is_capped_at_zero_not_negative() -> None:
+    discovery = DiscoveryExtraction(has_public_api=True)
+    extractor = FakeExtractor(ClassifyExtraction(auth_scheme="api_key", confidence=0.05))
+
+    result = await classify(
+        "example.com", docs_text="x", docs_url="https://forum.example.com/thread",
+        discovery=discovery, extractor=extractor,
+    )
+
+    assert result.confidence == 0.0
     assert result.reason_code == ReasonCode.CLASSIFY_LOW_CONFIDENCE
 
 

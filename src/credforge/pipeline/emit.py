@@ -72,7 +72,12 @@ def _build_from_gate(state: AppPipelineState, *, credforge_version: str) -> Hand
     assert state.gate is not None  # guaranteed by build_artifact's check
     app = AppInfo(app_name=state.app_name, identity_key=state.identity_key)
 
-    docs_url = state.resolve.chosen.docs_url if state.resolve and state.resolve.chosen else None
+    # The docs_url DISCOVER actually used, not RESOLVE's original top pick --
+    # they can differ (D-028's fallback-through-candidates), and that's the
+    # page CLASSIFY's source_tier is actually computed from.
+    docs_url = state.discovery.docs_url if state.discovery and state.discovery.docs_url else (
+        state.resolve.chosen.docs_url if state.resolve and state.resolve.chosen else None
+    )
     extraction = state.discovery.extraction if state.discovery else None
     api: ApiInfo | None = None
     if docs_url or extraction is not None:
@@ -86,6 +91,8 @@ def _build_from_gate(state: AppPipelineState, *, credforge_version: str) -> Hand
             validation_endpoint=extraction.validation_endpoint if extraction else None,
             scopes_available=state.classify.scopes_available if state.classify else [],
             redirect_uris_required=state.classify.redirect_uris_required if state.classify else False,
+            source_tier=state.classify.source_tier if state.classify else None,
+            classify_confidence=state.classify.confidence if state.classify else None,
         )
 
     credential: CredentialInfo | None = None
@@ -125,6 +132,18 @@ def _build_from_gate(state: AppPipelineState, *, credforge_version: str) -> Hand
                 snippet=state.resolve.chosen.evidence_snippet,
             )
         )
+        # D-049: which docs URL was selected and why -- computed at
+        # candidate-ranking time (state.resolve.chosen.docs_url_reason
+        # already names the tier and matched signal), never previously
+        # surfaced in the artifact at all despite always being computed.
+        if state.resolve.chosen.docs_url and state.resolve.chosen.docs_url_reason:
+            evidence.append(
+                EvidenceItem(
+                    claim=f"docs source selected: {state.resolve.chosen.docs_url_reason}",
+                    source_url=state.resolve.chosen.docs_url,
+                    snippet=state.resolve.chosen.docs_url_reason,
+                )
+            )
     evidence.extend(state.gate.evidence)
 
     return HandoffArtifact(

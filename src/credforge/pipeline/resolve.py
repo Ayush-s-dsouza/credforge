@@ -42,6 +42,7 @@ from ..providers.search import SearchProvider, SearchProviderError, SearchResult
 from ..registry.identity import slugify, unresolved_identity_key
 from ..utils.domains import parse_bare_domain, registrable_domain, subdomain_of
 from .explain import NULL_EXPLAIN, ExplainEvent, ExplainSink
+from .source_authority import describe_tier_match, tier_sort_key
 
 # A domain below this confidence isn't worth listing as an alternate at all.
 MIN_PLAUSIBLE_CONFIDENCE = 0.35
@@ -95,11 +96,6 @@ _PREFERRED_SUFFIXES = ("com",)
 # page is not developer documentation no matter how confidently it
 # resolves. This is what stopped RESOLVE from picking help.salesforce.com.
 _DOCS_NEGATIVE_SIGNALS = ("help", "support", "community", "status", "knowledgebase", "kb")
-
-# A URL whose subdomain or first path segment matches one of these is
-# strongly preferred over one that doesn't (but still isn't accepted
-# without passing the content check below).
-_DOCS_STRONG_SIGNALS = ("developer", "developers", "docs", "api")
 
 _DOCS_SUBDOMAIN_GUESSES = ("docs", "developer", "api")
 _DOCS_PATH_GUESSES = ("/docs", "/developers")
@@ -230,17 +226,6 @@ def _is_negative_docs_signal(url: str) -> bool:
     return subdomain_label in _DOCS_NEGATIVE_SIGNALS or path_first_segment in _DOCS_NEGATIVE_SIGNALS
 
 
-def _docs_signal_score(url: str) -> int:
-    """Higher is better. Only meaningful among URLs that already passed
-    _is_negative_docs_signal -- this ranks the rest, it doesn't gate them."""
-    subdomain_label, path_first_segment = _url_signal_tokens(url)
-    if subdomain_label in _DOCS_STRONG_SIGNALS:
-        return 2
-    if path_first_segment in _DOCS_STRONG_SIGNALS:
-        return 1
-    return 0
-
-
 def _looks_like_api_docs(text: str) -> bool:
     distinct_hits = sum(1 for pattern in _API_MARKER_PATTERNS if pattern.search(text))
     return distinct_hits >= _MIN_API_MARKER_HITS
@@ -267,16 +252,36 @@ def _conventional_docs_guesses(domain: str) -> list[str]:
 
 
 async def _collect_docs_candidate_urls(
-    app_name: str, domain: str, *, search: SearchProvider
+    app_name: str, domain: str, *, search: SearchProvider, explain: ExplainSink = NULL_EXPLAIN
 ) -> list[str]:
     """Every plausible docs URL from search + conventional guesses, deduped.
-    Order here doesn't matter -- ranking happens in the caller."""
+    Order here doesn't matter -- ranking happens in the caller.
+
+    The identification search (`resolve()`'s own "<app> official website"
+    call) already has a SearchProviderError fallback (D-024) -- this,
+    the *second*, later search (docs-URL discovery) did not, and a real
+    provider failure here used to propagate all the way out of resolve()
+    uncaught, crashing the whole app's batch iteration with no artifact at
+    all. Degrading to conventional guesses only (never raising) is the
+    same "provider failure isn't fatal" principle D-024 already
+    established, applied to the call site that was missing it.
+    """
     seen: set[str] = set()
     urls: list[str] = []
 
     for template in _DOCS_SEARCH_QUERY_TEMPLATES:
         query = template.format(app=app_name)
-        results = await search.search(query, count=8)
+        try:
+            results = await search.search(query, count=8)
+        except SearchProviderError as exc:
+            explain.emit(
+                ExplainEvent(
+                    stage=PipelineStage.RESOLVE,
+                    identity_key=domain,
+                    message=f"docs-URL search failed ({exc}) -- continuing with conventional guesses only",
+                )
+            )
+            continue
         for r in results:
             if registrable_domain(r.url) == domain and r.url not in seen:
                 urls.append(r.url)
@@ -293,14 +298,18 @@ async def _collect_docs_candidate_urls(
 async def _rank_and_verify_docs_candidates(
     candidate_urls: list[str], *, fetch: FetchProvider
 ) -> list[tuple[str, str]]:
-    """Filters out negative-signal URLs, ranks the rest by developer
-    signal, then fetches each in ranked order and keeps only the ones
-    whose *content* actually looks like API documentation. Returns
-    (url, reason) pairs, best first -- `reason` is why each one was
-    accepted, for evidence/auditability.
+    """Filters out negative-signal URLs, ranks the rest by three-tier
+    source authority (D-049: official reference > general docs/guide >
+    everything else -- blogs, tutorials, forums), then fetches each in
+    ranked order and keeps only the ones whose *content* actually looks
+    like API documentation. A stable sort means within a tier, candidates
+    keep whatever relative order they arrived in (search rank, then
+    conventional guesses). Returns (url, reason) pairs, best first --
+    `reason` names the specific tier and matched signal, for
+    evidence/auditability.
     """
     filtered = [u for u in candidate_urls if not _is_negative_docs_signal(u)]
-    filtered.sort(key=_docs_signal_score, reverse=True)
+    filtered.sort(key=tier_sort_key)
 
     verified: list[tuple[str, str]] = []
     for url in filtered:
@@ -313,19 +322,18 @@ async def _rank_and_verify_docs_candidates(
         if not _looks_like_api_docs(fetched.text):
             continue
 
-        score = _docs_signal_score(url)
-        signal_desc = "developer/docs subdomain or path" if score > 0 else "neutral URL, but content matched API documentation markers"
+        tier_desc = describe_tier_match(url)
         marker_hits = [p.pattern for p in _API_MARKER_PATTERNS if p.search(fetched.text)]
-        reason = f"{signal_desc}; matched content markers: {', '.join(marker_hits[:4])}"
+        reason = f"{tier_desc}; matched content markers: {', '.join(marker_hits[:4])}"
         verified.append((fetched.final_url, reason))
 
     return verified
 
 
 async def _discover_docs_candidates(
-    app_name: str, domain: str, *, search: SearchProvider, fetch: FetchProvider
+    app_name: str, domain: str, *, search: SearchProvider, fetch: FetchProvider, explain: ExplainSink = NULL_EXPLAIN
 ) -> list[tuple[str, str]]:
-    candidate_urls = await _collect_docs_candidate_urls(app_name, domain, search=search)
+    candidate_urls = await _collect_docs_candidate_urls(app_name, domain, search=search, explain=explain)
     return await _rank_and_verify_docs_candidates(candidate_urls, fetch=fetch)
 
 
@@ -484,7 +492,7 @@ async def _resolve_bare_domain(
         )
     )
 
-    verified_docs = await _discover_docs_candidates(domain, domain, search=search, fetch=fetch)
+    verified_docs = await _discover_docs_candidates(domain, domain, search=search, fetch=fetch, explain=explain)
     docs_url_candidates = [url for url, _ in verified_docs]
     docs_url = docs_url_candidates[0] if docs_url_candidates else None
     docs_url_reason = verified_docs[0][1] if verified_docs else None
@@ -620,7 +628,7 @@ async def resolve(
 
     # Only reachable once a single candidate clearly leads -- now it's
     # worth spending real search+fetch calls to rank and verify its docs.
-    verified_docs = await _discover_docs_candidates(cleaned, top.domain, search=search, fetch=fetch)
+    verified_docs = await _discover_docs_candidates(cleaned, top.domain, search=search, fetch=fetch, explain=explain)
     docs_url_candidates = [url for url, _ in verified_docs]
     docs_url = docs_url_candidates[0] if docs_url_candidates else None
     docs_url_reason = verified_docs[0][1] if verified_docs else None

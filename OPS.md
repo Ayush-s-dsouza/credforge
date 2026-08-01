@@ -385,6 +385,47 @@ direct consequence of D-048's identity-pinning fix actually working:**
    real, reproducible-in-context gap rather than papered over as
    one-off flakiness.
 
+## Source-authority weighting (D-049): measured effect, plus two crashes it exposed
+
+Re-running the seed batch to measure D-049 (three-tier docs-candidate
+ranking + tier-aware CLASSIFY confidence) against the volatility already
+documented above required getting a *clean* 20/20 run at all, which
+surfaced two real, previously-latent crash bugs -- neither caused by
+D-049 itself, both fixed before a trustworthy before/after comparison
+was possible:
+
+- **D-050**: `batch` opened a fresh `asyncio` event loop per app while
+  sharing one `HttpxFetchProvider` (and its one `httpx.AsyncClient`)
+  across the whole run. httpx binds a client's connection pool to
+  whichever loop is active on its first real request; once that loop
+  closed (end of app N's `asyncio.run()`), reusing the pool from app
+  N+1's *new* loop raised `RuntimeError: Event loop is closed` --
+  observed live, app 16 of 20, non-deterministic (timing-dependent on
+  real connection-pool state, which is why it hadn't shown up in every
+  prior run). Fixed by wrapping the entire batch in one `asyncio.run()`,
+  not one per app.
+- **D-051**: RESOLVE's *docs-URL* search (the second search call,
+  looking for developer docs once identity is confirmed) had no
+  `SearchProviderError` fallback -- only the *identification* search
+  (`"<app> official website"`) had one, from D-024. A real DDG timeout
+  against Mojeek's backend crashed that app's entire run, zero artifact,
+  `batch`'s outer exception handler swallowing it into a bare "ERROR"
+  line with no registry entry. Fixed the same way D-024 fixed the first
+  search call: degrade to conventional-guess URLs, never raise.
+
+**Measured result once both were fixed** (`run_20260801T084914Z_04685c6b`
+against `run_20260730T170035Z_4a8d3af4`; full per-app table in README.md):
+`classify_low_confidence` 8 apps -> 4. AUTO 2 apps -> 6. Of 16 apps that
+reached a real docs page, source_tier breaks down 12 HIGH / 3 MEDIUM / 1
+LOW (Salesforce, correctly -- DISCOVER's own bare-domain fallback isn't a
+docs page). Checked all 20 apps individually for regressions: none found.
+Several other apps that also changed between these two runs (Discord,
+Etsy, Google Calendar, Mailgun) did so at the RESOLVE identification
+step -- a code path D-049 never touches -- and are attributed to the
+same pre-existing search-provider volatility documented above, not to
+this fix; README's before/after table marks each row accordingly rather
+than crediting D-049 for changes it structurally couldn't have caused.
+
 ## What makes a vendor recipe-able: two real vendors, two real outcomes
 
 Two real `--live` attempts, both against real vendor infrastructure, both

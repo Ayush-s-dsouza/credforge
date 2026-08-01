@@ -16,7 +16,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..enums import AuthScheme, CredentialType, ReasonCode, Status
+from ..enums import AuthScheme, CredentialType, ReasonCode, SourceTier, Status
 from .state import CompletenessGap, EvidenceItem
 
 
@@ -35,6 +35,14 @@ class ApiInfo(BaseModel):
     validation_endpoint: str | None = None
     scopes_available: list[str] = Field(default_factory=list)
     redirect_uris_required: bool = False
+    # Which authority tier the docs page CLASSIFY actually read belongs
+    # to (D-049) -- lets a consumer tell a HIGH-tier-derived auth_scheme
+    # apart from a LOW-tier one, even at the same numeric confidence.
+    source_tier: SourceTier | None = None
+    # The *adjusted* confidence (source-tier weighting already applied,
+    # D-049) -- was computed by CLASSIFY all along but never previously
+    # exposed anywhere in the artifact itself, only in-process.
+    classify_confidence: float | None = None
 
 
 class CredentialInfo(BaseModel):

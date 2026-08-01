@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from credforge.enums import AuthScheme, CredentialType, ReasonCode, Status
+from credforge.enums import AuthScheme, CredentialType, ReasonCode, SourceTier, Status
 from credforge.models.artifact import HandoffArtifact
 from credforge.models.state import (
     AppPipelineState,
@@ -243,6 +243,41 @@ def test_unsupported_app_emits_with_no_credential_but_keeps_api_info_as_evidence
     assert artifact.status == Status.UNSUPPORTED
     assert artifact.api.docs_url == "https://docs.github.com/en/rest"
     assert artifact.credential is None
+
+
+def test_source_tier_and_docs_url_selection_reason_reach_the_artifact() -> None:
+    # D-049: both previously computed, neither previously surfaced --
+    # docs_url_reason was dropped entirely by EMIT, and source_tier didn't
+    # exist as a field at all. Both must now actually appear.
+    resolved = ResolveResult(
+        resolved=True,
+        chosen=ResolveCandidate(
+            domain="github.com",
+            docs_url="https://docs.github.com/en/rest",
+            docs_url_reason="HIGH-tier (path segment 'rest'); matched content markers: foo, bar",
+            confidence=0.98,
+            evidence_url="https://github.com/",
+            evidence_snippet="GitHub is where you belong.",
+        ),
+    )
+    state = _base_state(
+        resolve=resolved,
+        discovery=_discovered(),
+        classify=ClassifyResult(
+            auth_scheme=AuthScheme.OAUTH2_AUTH_CODE, confidence=0.9, source_tier=SourceTier.HIGH,
+        ),
+        gate=_gate_auto(),
+    )
+
+    artifact = build_artifact(state)
+
+    assert artifact.api.source_tier == SourceTier.HIGH
+    # resolve's identity evidence + the new docs-source evidence + GATE's ToS evidence
+    assert len(artifact.evidence) == 3
+    docs_evidence = [e for e in artifact.evidence if "docs source selected" in e.claim]
+    assert len(docs_evidence) == 1
+    assert "HIGH-tier" in docs_evidence[0].claim
+    assert docs_evidence[0].source_url == "https://docs.github.com/en/rest"
 
 
 def test_none_auth_scheme_emits_an_explicit_no_credential_required_credential_block() -> None:

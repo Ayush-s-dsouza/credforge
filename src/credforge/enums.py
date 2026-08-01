@@ -94,3 +94,14 @@ class StageStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
+
+
+class SourceTier(StrEnum):
+    """How authoritative a docs-candidate URL's *shape* is, not its
+    content -- HIGH: official API reference. MEDIUM: general docs/guide.
+    LOW: everything else (blogs, tutorials, forums). See
+    pipeline/source_authority.py and DECISIONS.md D-049."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"

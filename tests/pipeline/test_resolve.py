@@ -290,7 +290,117 @@ async def test_docs_url_reason_is_recorded_for_auditability() -> None:
     result = await resolve("GitHub", search=search, fetch=fetch)
 
     assert result.chosen.docs_url_reason is not None
-    assert "developer/docs subdomain" in result.chosen.docs_url_reason
+    # docs.github.com/en/rest -- "docs" subdomain alone would be MEDIUM,
+    # but the "rest" path segment is a real, official-reference signal (D-049).
+    assert "HIGH-tier" in result.chosen.docs_url_reason
+    assert "'rest'" in result.chosen.docs_url_reason
+
+
+@pytest.mark.asyncio
+async def test_high_tier_reference_wins_over_a_lower_ranked_low_tier_tutorial() -> None:
+    # D-049, the actual bug: a Trailhead-shaped tutorial URL that search
+    # ranked FIRST must still lose to an official /reference/ page ranked
+    # second -- tier beats search rank, not the other way around. Real
+    # shape: Salesforce's own Trailhead tutorial out-scored its real API
+    # reference under the old flat "has a signal word or not" ranking.
+    search = FakeSearchProvider(
+        {
+            "Widgetco official website": [
+                SearchResult(title="Widgetco", url="https://widgetco.com/", snippet="...", rank=1),
+            ],
+            "Widgetco developer API documentation": [
+                SearchResult(
+                    title="Get started with the Widgetco API (tutorial)",
+                    url="https://trailhead.widgetco.com/get-started-tutorial",
+                    snippet="a friendly walkthrough",
+                    rank=1,
+                ),
+                SearchResult(
+                    title="Widgetco API Reference",
+                    url="https://widgetco.com/api/reference",
+                    snippet="the real reference",
+                    rank=2,
+                ),
+            ],
+        }
+    )
+    fetch = FakeFetchProvider(
+        {
+            "https://trailhead.widgetco.com/get-started-tutorial": _ok("https://trailhead.widgetco.com/get-started-tutorial"),
+            "https://widgetco.com/api/reference": _ok("https://widgetco.com/api/reference"),
+        }
+    )
+
+    result = await resolve("Widgetco", search=search, fetch=fetch)
+
+    assert result.chosen.docs_url == "https://widgetco.com/api/reference"
+    assert "HIGH-tier" in result.chosen.docs_url_reason
+    # both were content-verified and kept as fallback candidates, in tier order
+    assert result.chosen.docs_url_candidates[0] == "https://widgetco.com/api/reference"
+    assert "https://trailhead.widgetco.com/get-started-tutorial" in result.chosen.docs_url_candidates
+
+
+@pytest.mark.asyncio
+async def test_medium_tier_docs_subdomain_beats_low_tier_blog_regardless_of_rank() -> None:
+    search = FakeSearchProvider(
+        {
+            "Widgetco official website": [
+                SearchResult(title="Widgetco", url="https://widgetco.com/", snippet="...", rank=1),
+            ],
+            "Widgetco developer API documentation": [
+                SearchResult(
+                    title="How I integrated Widgetco (blog)", url="https://blog.widgetco.com/how-i-integrated",
+                    snippet="a blog post", rank=1,
+                ),
+                SearchResult(
+                    title="Widgetco Docs", url="https://docs.widgetco.com/getting-started",
+                    snippet="general docs", rank=2,
+                ),
+            ],
+        }
+    )
+    fetch = FakeFetchProvider(
+        {
+            "https://blog.widgetco.com/how-i-integrated": _ok("https://blog.widgetco.com/how-i-integrated"),
+            "https://docs.widgetco.com/getting-started": _ok("https://docs.widgetco.com/getting-started"),
+        }
+    )
+
+    result = await resolve("Widgetco", search=search, fetch=fetch)
+
+    assert result.chosen.docs_url == "https://docs.widgetco.com/getting-started"
+    assert "MEDIUM-tier" in result.chosen.docs_url_reason
+
+
+@pytest.mark.asyncio
+async def test_within_a_tier_existing_search_rank_order_is_preserved() -> None:
+    # Two candidates, same tier (both LOW -- neither matches any HIGH/MEDIUM
+    # signal), both on-domain (docs-candidate collection only keeps hits on
+    # the already-resolved company domain) -- the higher-*ranked* one
+    # (arrived first) must still win, proving the tier sort is stable, not
+    # an unconditional re-sort.
+    search = FakeSearchProvider(
+        {
+            "Widgetco official website": [
+                SearchResult(title="Widgetco", url="https://widgetco.com/", snippet="...", rank=1),
+            ],
+            "Widgetco developer API documentation": [
+                SearchResult(title="Widgetco blog writeup", url="https://widgetco.com/blog/integration-writeup", snippet="...", rank=1),
+                SearchResult(title="Widgetco forum thread", url="https://widgetco.com/forum/thread-123", snippet="...", rank=2),
+            ],
+        }
+    )
+    fetch = FakeFetchProvider(
+        {
+            "https://widgetco.com/blog/integration-writeup": _ok("https://widgetco.com/blog/integration-writeup"),
+            "https://widgetco.com/forum/thread-123": _ok("https://widgetco.com/forum/thread-123"),
+        }
+    )
+
+    result = await resolve("Widgetco", search=search, fetch=fetch)
+
+    assert result.chosen.docs_url == "https://widgetco.com/blog/integration-writeup"
+    assert "LOW-tier" in result.chosen.docs_url_reason
 
 
 @pytest.mark.asyncio
@@ -603,6 +713,46 @@ async def test_search_failure_still_produces_a_real_artifact_shaped_result_not_a
     result = await resolve("AnythingAtAll", search=search, fetch=fetch)
 
     assert isinstance(result, ResolveResult)
+
+
+class SearchThatFailsOnlyOnDocsQueries:
+    """D-051's real shape: the identification search ("<app> official
+    website") succeeds fine -- a company was found -- but the *second*,
+    later search for developer docs fails for real. A categorically
+    different scenario from RaisingSearchProvider (which fails on the
+    very first call): this proves resolve() as a whole degrades
+    gracefully even when the failure happens well past the ambiguity
+    check, not just at the very start."""
+
+    def __init__(self, identification_results: list[SearchResult]) -> None:
+        self._identification_results = identification_results
+        self.calls: list[str] = []
+
+    async def search(self, query: str, *, count: int = 10) -> list[SearchResult]:
+        self.calls.append(query)
+        if query.endswith("official website"):
+            return self._identification_results
+        raise SearchProviderError("docs search backend timed out")
+
+
+@pytest.mark.asyncio
+async def test_docs_search_failure_degrades_to_conventional_guesses_not_a_crash() -> None:
+    # D-051: found live, mid-batch -- a real SearchProviderError from the
+    # *docs-URL* search (not the identification search D-024 already
+    # covered) used to propagate all the way out of resolve() uncaught.
+    search = SearchThatFailsOnlyOnDocsQueries(
+        [SearchResult(title="Widgetco", url="https://widgetco.com/", snippet="...", rank=1)]
+    )
+    fetch = FakeFetchProvider({"https://docs.widgetco.com": _ok("https://docs.widgetco.com", _API_DOCS_LIKE_TEXT)})
+
+    result = await resolve("Widgetco", search=search, fetch=fetch)
+
+    assert isinstance(result, ResolveResult)
+    assert result.resolved is True
+    assert result.chosen.domain == "widgetco.com"
+    # degraded to conventional guessing (docs.widgetco.com) since both
+    # docs-search query templates raised
+    assert result.chosen.docs_url == "https://docs.widgetco.com"
 
 
 # --- Bare domain trust (D-047) -------------------------------------------
