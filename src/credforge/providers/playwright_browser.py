@@ -83,9 +83,23 @@ class SignupRecipe(BaseModel):
     redirect_uri_field_selector: str | None = None
 
     # Credential extraction, page-based -- read after signup completes.
+    # Whether this vendor's page-based flow needs an email-verification
+    # step before the credential becomes visible (an OAuth-console-style
+    # dashboard) or not (an immediate same-page AJAX response, e.g. Alpha
+    # Vantage's "Your dedicated access key is: X" -- no email step exists
+    # at all). Defaults False: the old, previously-untested assumption
+    # that every page-based flow needs an email wait first was never
+    # actually correct for every vendor shape, just the only one tried.
+    requires_email_verification: bool = False
     client_id_selector: str | None = None
     client_secret_selector: str | None = None
     api_key_page_selector: str | None = None
+    # Optional: the page-based selector's raw text_content often includes
+    # surrounding prose ("Your dedicated access key is: X. Please record
+    # ..."), not a clean value -- a regex here extracts just the key,
+    # mirroring api_key_email_regex's same need on the email-based path.
+    # None means use the selector's raw text_content as-is.
+    api_key_page_regex: str | None = None
 
     # Credential extraction, email-based -- some vendors (NASA) email the
     # credential directly with no page to scrape at all. Exactly one
@@ -161,6 +175,39 @@ class PlaywrightBrowserDriver:
 
                 raw_api_credential: dict[str, str] = {}
 
+                if recipe.credential_type != CredentialType.NONE and not (
+                    recipe.api_key_email_regex
+                    or recipe.client_id_selector
+                    or recipe.client_secret_selector
+                    or recipe.api_key_page_selector
+                ):
+                    # A recipe with a real credential_type but no extraction
+                    # mechanism at all can never capture a credential --
+                    # usually because signup itself is known to be blocked
+                    # (e.g. a CAPTCHA wall) before any credential page is
+                    # ever reached, so no selector was ever observable to
+                    # record. Without this check, control falls through to
+                    # the success return below with an empty
+                    # raw_api_credential -- a false "provisioned" that
+                    # vaults nothing. See DECISIONS.md D-053.
+                    steps.append(
+                        ProvisionStepResult(
+                            step="extract_credential",
+                            success=False,
+                            detail="recipe has no configured extraction mechanism for this credential_type",
+                        )
+                    )
+                    return ProvisionOutcome(
+                        success=False,
+                        credential_type=CredentialType.NONE,
+                        steps=steps,
+                        failure_reason=(
+                            f"no extraction mechanism configured for {domain!r} -- "
+                            "signup form was submitted but this recipe cannot capture "
+                            "a credential (see the recipe's registration comment for why)"
+                        ),
+                    )
+
                 if recipe.api_key_email_regex:
                     message = await email_provider.wait_for_message(
                         to_addr=email_alias, subject_contains=recipe.email_subject_contains
@@ -188,22 +235,62 @@ class PlaywrightBrowserDriver:
                     raw_api_credential["api_key"] = match.group(1)
                     steps.append(ProvisionStepResult(step="extract_credential_from_email", success=True))
                 elif recipe.client_id_selector or recipe.client_secret_selector or recipe.api_key_page_selector:
-                    message = await email_provider.wait_for_message(
-                        to_addr=email_alias, subject_contains=recipe.email_subject_contains or "verify"
-                    )
-                    steps.append(
-                        ProvisionStepResult(step="verify_email", success=True, detail=f"message_id={message.message_id}")
-                    )
-                    # A real recipe would also extract and visit the verification
-                    # link from message.body_text here. Left as the natural next
-                    # step once a real recipe exists to test it against -- see
-                    # DECISIONS.md D-031's "Revisit if" note.
+                    if recipe.requires_email_verification:
+                        message = await email_provider.wait_for_message(
+                            to_addr=email_alias, subject_contains=recipe.email_subject_contains or "verify"
+                        )
+                        steps.append(
+                            ProvisionStepResult(
+                                step="verify_email", success=True, detail=f"message_id={message.message_id}"
+                            )
+                        )
+                        # A real recipe would also extract and visit the verification
+                        # link from message.body_text here. Left as the natural next
+                        # step once a real recipe exists to test it against -- see
+                        # DECISIONS.md D-031's "Revisit if" note.
+                    elif recipe.api_key_page_selector:
+                        # No email step -- the credential renders into the page via
+                        # AJAX shortly after submit, not synchronously with the
+                        # click. Poll for the actual pattern, not just "selector
+                        # has any text" -- a broad selector (e.g. the whole page
+                        # body, needed when the AJAX response's exact container
+                        # isn't reliably identifiable in advance) already has
+                        # plenty of static text before the credential ever loads,
+                        # so a bare non-empty check would exit immediately.
+                        for _ in range(20):
+                            probe_text = await page.text_content(recipe.api_key_page_selector) or ""
+                            if recipe.api_key_page_regex:
+                                if re.search(recipe.api_key_page_regex, probe_text):
+                                    break
+                            elif probe_text.strip():
+                                break
+                            await page.wait_for_timeout(500)
+
                     if recipe.client_id_selector:
                         raw_api_credential["client_id"] = await page.text_content(recipe.client_id_selector) or ""
                     if recipe.client_secret_selector:
                         raw_api_credential["client_secret"] = await page.text_content(recipe.client_secret_selector) or ""
                     if recipe.api_key_page_selector:
-                        raw_api_credential["api_key"] = await page.text_content(recipe.api_key_page_selector) or ""
+                        page_text = await page.text_content(recipe.api_key_page_selector) or ""
+                        if recipe.api_key_page_regex:
+                            page_match = re.search(recipe.api_key_page_regex, page_text)
+                            if page_match is None:
+                                steps.append(
+                                    ProvisionStepResult(
+                                        step="extract_credential",
+                                        success=False,
+                                        detail="api_key_page_regex did not match the page content",
+                                    )
+                                )
+                                return ProvisionOutcome(
+                                    success=False,
+                                    credential_type=CredentialType.NONE,
+                                    steps=steps,
+                                    failure_reason="signup page loaded but the credential regex found no match",
+                                )
+                            raw_api_credential["api_key"] = page_match.group(1)
+                        else:
+                            raw_api_credential["api_key"] = page_text
                     steps.append(ProvisionStepResult(step="extract_credential", success=True))
 
                 return ProvisionOutcome(

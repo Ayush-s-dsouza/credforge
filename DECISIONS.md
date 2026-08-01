@@ -2499,3 +2499,107 @@ zero artifact, zero registry entry, and the app silently missing from
 D-038/D-039 exist to prevent one stage earlier. Degrading gracefully
 inside `resolve()` itself, so every app still reaches EMIT, is the
 correct fix, not a wider try/except further out.
+
+### D-052: `SignupRecipe` gains `requires_email_verification` and `api_key_page_regex` -- page-based extraction was never actually two shapes, it was three
+
+**Decided:** `SignupRecipe` (`providers/playwright_browser.py`) gains two
+fields: `requires_email_verification: bool = False` (does this vendor's
+page-based flow need an email-verification wait before the credential is
+visible, or does it render immediately) and `api_key_page_regex: str |
+None` (an optional regex to extract just the credential out of a page
+selector's raw text, mirroring what `api_key_email_regex` already does
+for the email path). `signup_and_create_app()`'s page-based extraction
+branch now checks `requires_email_verification` before deciding whether
+to wait on `email_provider.wait_for_message()` at all, and -- when a page
+selector is set without an email wait -- polls for the *regex match*
+specifically, not just non-empty selector text.
+
+**Found live, building Alpha Vantage's recipe:** the two page-based
+recipes that existed before this (NASA is email-only; OpenWeatherMap
+never got past its CAPTCHA to reach extraction, D-046) meant page-based
+extraction's actual behavior -- unconditionally wait for an
+email-verification message, then read a selector -- had never been
+exercised by a real vendor. Alpha Vantage's real flow renders the key
+into the page via AJAX a few hundred milliseconds after submit, with *no*
+email step of any kind: the AJAX response fires whether or not the
+address is real, deliverable, or ever checked. The old code would have
+hung waiting on an email that was never going to arrive. Separately, the
+key's exact DOM container was never reliably identifiable by inspection
+(`#results` stayed empty on `innerHTML` probing even after the key was
+visibly rendered elsewhere in the page) -- the only reliable selector was
+`"body"`, and a bare "selector has any text" poll exits immediately
+against a selector that broad, since ordinary page chrome is never empty.
+Polling for the regex match itself, not just non-empty text, is what
+makes a broad fallback selector usable at all.
+
+**Rejected: a separate boolean like `has_no_email_step` inverted from
+`requires_email_verification`.** Functionally identical; phrased as
+"requires verification" (default `False`) because that's the assumption
+being corrected -- every recipe written before this one implicitly
+assumed page-based extraction always needs an email wait, and that
+assumption was simply wrong for a vendor shape nobody had tried yet.
+
+**Revisit if:** a future vendor needs email verification *and* has no
+identifiable credential-page selector -- the two new fields are
+independent today, but a vendor combining "waits for email" with "regex
+extraction only, no reliable container" hasn't been observed and isn't
+tested.
+
+### D-053: Page-based extraction with zero extraction mechanism must fail explicitly, not silently report an empty "success"
+
+**Decided:** `signup_and_create_app()` now checks, immediately after
+submit, whether `credential_type != CredentialType.NONE` and *none* of
+`api_key_email_regex` / `client_id_selector` / `client_secret_selector` /
+`api_key_page_selector` are set on the recipe. If so, it returns a real
+`ProvisionOutcome(success=False, ...)` with a specific `failure_reason`,
+instead of falling through the extraction `if`/`elif` chain untouched and
+reaching the success return at the bottom with an empty
+`raw_api_credential`.
+
+**Found live, writing IPinfo's recipe for the "attempt it anyway, despite
+the flagged invisible reCAPTCHA" stress test (see OPS.md and README.md):**
+IPinfo's real signup form was fully field-complete (first name, last
+name, email, password -- a genuine `account_email` +
+`account_password_ref` archetype, the one the seed batch had never
+exercised live), but a real submission -- ordinary headless Chromium, no
+retries, no evasion attempted -- tripped Google's invisible reCAPTCHA v2
+risk score and escalated to a full interactive "Select all images with
+cars" challenge, confirmed by screenshot. Since the credential page was
+never reached, there was nothing to write an `api_key_page_selector`
+against, and the recipe was registered with no extraction mechanism at
+all -- the same shape OpenWeatherMap's recipe (D-046) has had all along.
+Tracing `signup_and_create_app()`'s control flow for this exact shape
+found the bug: with every extraction field unset, none of the
+`if`/`elif` branches ever execute, and execution falls straight through
+to `return ProvisionOutcome(success=True, ..., raw_api_credential={})` --
+a false "provisioned" that vaults nothing. `PROVISION` would have
+recorded `status="provisioned"` with `credential_type=API_KEY` and
+`api_key_ref=None`, silently misreporting a CAPTCHA-blocked signup as
+successful. This means OpenWeatherMap's recipe comment ("Registered here
+... so the failure is `PROVISION_FAILED` with a real, specific reason")
+was never actually true until this fix -- confirmed by re-running IPinfo
+through the real `provision()` pipeline after the fix: `status="failed"`,
+`api_key_ref=None`, with an `extract_credential` step explicitly marked
+`success=False` and the real reason recorded.
+
+**Rejected: a Pydantic `model_validator` on `SignupRecipe` requiring at
+least one extraction mechanism whenever `credential_type != NONE`.**
+Would catch this at recipe-definition time instead of at run time, which
+sounds strictly better -- except it would also make it *impossible* to
+register a recipe for a vendor that's fully field-complete but
+confirmed-blocked before the credential page, exactly IPinfo and
+OpenWeatherMap's actual, legitimate shape. Registering those recipes
+anyway (with a `PROVISION_FAILED` at run time, not a validation error at
+import time) is deliberate: it's what turns "someone already investigated
+this vendor and hit a specific, named wall" into a fact the next
+`--live` attempt discovers immediately, instead of a silent "no recipe"
+that looks unresearched. The runtime check preserves that while fixing
+the actual defect (the false success), which is the narrower, correct
+fix.
+
+**Verified:** `tests/providers/test_playwright_browser.py::test_recipe_with_no_extraction_mechanism_fails_instead_of_reporting_empty_success`
+drives a real Playwright browser against a local `data:` URL form (no
+network, no vendor dependency) with a recipe that has a real
+`credential_type` and no extraction selectors, and asserts the outcome is
+an explicit failure with an empty credential -- not a silent success.
+214/214 tests pass including this one.

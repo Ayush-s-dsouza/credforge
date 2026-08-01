@@ -90,6 +90,76 @@ OPENWEATHERMAP = SignupRecipe(
     api_key_email_regex=None,
 )
 
+# alphavantage.co/support/#api-key -- organization (text) + occupation
+# (select, left at its default "Investor" -- not marked required in the
+# real DOM) + email. No password, no account, no CAPTCHA (confirmed by
+# real DOM/iframe/script inspection). The key appears on the *same page*
+# via AJAX a few hundred ms after submit, in prose ("Welcome to Alpha
+# Vantage! Your dedicated access key is: <16 uppercase alphanumeric
+# chars>. Please record..."), not in an isolable container found by
+# inspection -- hence
+# `api_key_page_selector="body"` + a regex, not a narrow selector.
+# `requires_email_verification=False` because this genuinely has no email
+# step at all -- confirmed live: the AJAX response arrives whether or not
+# the address is real, deliverable, or ever checked.
+#
+# Real, rendered DOM (id="post-form"):
+#   <select name="occupation" id="occupation-text">...</select>
+#   <input type="text" name="organization" id="organization-text" required>
+#   <input type="text" name="email" id="email-text" required maxlength="254">
+#   <input id="submit-btn" type="submit" value="Get Free API Key">
+ALPHA_VANTAGE = SignupRecipe(
+    email_field_selector="#email-text",
+    app_name_field_selector="#organization-text",  # repurposed: no dedicated "organization" field exists on SignupRecipe
+    submit_selector="#submit-btn",
+    credential_type=CredentialType.API_KEY,
+    docs_url="https://www.alphavantage.co/documentation/",
+    requires_email_verification=False,
+    api_key_page_selector="body",
+    api_key_page_regex=r"Your dedicated access key is:\s*([A-Z0-9]{16})",
+)
+
+# ipinfo.io/signup -- first name, last name, email, password (a real
+# account_email + account_password archetype, distinct from every other
+# recipe here). Fields read from the real rendered DOM; the framework
+# (Headless UI/Next.js) generates unstable per-load `id`s
+# (`headlessui-control-_R_hmmm56_`), so selectors use the stable `name`
+# attribute instead:
+#   <input name="firstname">  <input name="lastname">
+#   <input name="email">      <input name="password" type="password">
+#   <button type="submit">Get started now</button>
+#
+# NOT provisionable live: a Google reCAPTCHA v2 *invisible* widget
+# (`class="grecaptcha-badge"`, `size=invisible`, sitekey
+# 6LftmFkUAAAAADydGEH99T-xmZoK69ErtRCzfVFf`) sits on the page and
+# auto-executes on submit -- confirmed live, this is not a bare "CAPTCHA
+# present" guess. A real submission (real name/email/generated password,
+# ordinary headless Chromium, no mouse jitter) did not pass silently on
+# behavioral score alone: it escalated to a full interactive image
+# challenge ("Select all images with cars"), screenshotted mid-run. That
+# answers the specific question this vendor was chosen to test -- whether
+# the *invisible* reCAPTCHA variant (as opposed to OpenWeatherMap's
+# visible checkbox, D-046) is actually weaker against a well-behaved
+# script. It isn't: invisible just moves the challenge from "always shown"
+# to "shown when the risk score says so," and a scripted Playwright
+# session with no real user signal reliably trips that score. Registered
+# here (not omitted) for the same reason as OPENWEATHERMAP: the next
+# `--live` attempt against ipinfo.io gets a real, specific
+# `PROVISION_FAILED` instead of a silent "no recipe."
+IPINFO = SignupRecipe(
+    email_field_selector="input[name='email']",
+    first_name_field_selector="input[name='firstname']",
+    last_name_field_selector="input[name='lastname']",
+    password_field_selector="input[name='password']",
+    submit_selector="button[type='submit']",
+    credential_type=CredentialType.API_KEY,
+    docs_url="https://ipinfo.io/developers",
+    # Never reached live -- the reCAPTCHA challenge blocks before any
+    # dashboard/token page loads, so where the token would actually appear
+    # (dashboard vs. email) was never observed.
+    api_key_page_selector=None,
+)
+
 LIVE_SIGNUP_RECIPES: dict[str, SignupRecipe] = {
     # Keyed by *registrable* domain (registrable_domain("https://api.nasa.gov/")
     # == "nasa.gov", not "api.nasa.gov" -- "api" is a subdomain, dropped
@@ -97,4 +167,6 @@ LIVE_SIGNUP_RECIPES: dict[str, SignupRecipe] = {
     # looks up by. Keying this "api.nasa.gov" would silently never match.
     "nasa.gov": NASA_API,
     "openweathermap.org": OPENWEATHERMAP,
+    "alphavantage.co": ALPHA_VANTAGE,
+    "ipinfo.io": IPINFO,
 }
