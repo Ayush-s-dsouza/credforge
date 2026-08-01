@@ -153,22 +153,93 @@ not a D-049 effect, even though it looks like one at a glance.
 wrong for most apps** — Superhuman remains the one seed prediction that
 has now held across three real runs (`UNSUPPORTED`/`no_public_api`).
 
+## Live provisioning: four real vendors, real credentials or a real, diagnosed block
+
+Everything above is the mocked (non-`--live`) seed batch. Separately,
+four real `--live` attempts have gone through `PlaywrightBrowserDriver`
+against real vendor infrastructure — two produced a real, vaulted,
+independently-validated credential; two hit a real, precisely-diagnosed
+block, not a generic failure:
+
+| vendor | result | wall clock | credential delivery |
+|---|---|---|---|
+| NASA API | **provisioned + validated** | 21.3s | emailed directly, regex-extracted |
+| Alpha Vantage | **provisioned + validated** | 5.59s | same-page AJAX response, no email step at all |
+| OpenWeatherMap | `PROVISION_FAILED` — visible reCAPTCHA v2 | — | never reached |
+| IPinfo | `PROVISION_FAILED` — invisible reCAPTCHA v2, escalates to a full interactive challenge | — | never reached |
+
+IPinfo was a deliberate stress test: does an *invisible*, risk-score-gated
+reCAPTCHA behave differently against a well-behaved script than
+OpenWeatherMap's always-visible one? Confirmed live, it doesn't — an
+ordinary headless session with no evasion attempted still tripped it.
+IPinfo also carried the one credential archetype never yet fired live —
+a real `account_email` + generated `account_password_ref`, with a login
+step waiting behind signup — and it still remains unproven, since the
+CAPTCHA blocks before that step is ever reached. Full per-vendor table,
+what's recipe-able vs. not, and why, in
+[`OPS.md`](OPS.md#what-makes-a-vendor-recipe-able-four-real-vendors-four-real-outcomes).
+
 ## What it gets wrong
 
-- **A soft-404 produced a false `AUTO`, and the first fix for it was
-  incomplete.** Running Spotify through GATE, a guessed ToS URL returned
-  HTTP 200 with Spotify's own branded "page not found" copy. Nothing
-  distinguished that from a real ToS page, GATE found no prohibition in
-  it (correctly — it wasn't ToS text), and cleared Spotify to `AUTO`
-  having never reviewed real terms. The first fix added a soft-404
-  keyword check and looked complete after one live re-run — it wasn't.
-  The *next* guessed URL was a second, differently-worded Spotify
-  soft-404 the first keyword list didn't catch, and Spotify still cleared
-  to `AUTO`, from a different URL. Only fetching all seven guessed paths
-  directly and comparing them by hand caught that both were soft-404s.
-  Full account in DECISIONS.md D-035. The underlying detection is still a
-  hand-maintained keyword list, not a general solution — see "what's
-  next."
+- **Three separate bugs, found independently at different stages of the
+  build, turned out to be one failure mode: the pipeline reporting
+  success — or silently omitting a failure — that it hadn't actually
+  earned.** They read as unrelated (a report count, a GATE verdict, a
+  vault entry), but each is the same underlying mistake: treating "the
+  pipeline reached a terminal-looking state" as proof that the state was
+  actually verified, instead of checking.
+  - *The report silently dropped early failures (D-038/D-039).* Before
+    these fixes, an app that failed at RESOLVE or hit `DISCOVERY_FAILED`
+    returned early with no artifact at all — invisible to `report.json`'s
+    totals, not counted as a failure of any kind. A batch's apparent
+    completeness depended on which stage each app happened to fail at,
+    silently.
+  - *A soft-404 produced a false `AUTO`, and the first fix for it was
+    incomplete.* Running Spotify through GATE, a guessed ToS URL returned
+    HTTP 200 with Spotify's own branded "page not found" copy. Nothing
+    distinguished that from a real ToS page, GATE found no prohibition in
+    it (correctly — it wasn't ToS text), and cleared Spotify to `AUTO`
+    having never reviewed real terms. The first fix added a soft-404
+    keyword check and looked complete after one live re-run — it wasn't.
+    The *next* guessed URL was a second, differently-worded Spotify
+    soft-404 the first keyword list didn't catch, and Spotify still
+    cleared to `AUTO`, from a different URL. Only fetching all seven
+    guessed paths directly and comparing them by hand caught that both
+    were soft-404s. Full account in DECISIONS.md D-035.
+  - *PROVISION could report `"provisioned"` with no actual credential
+    (D-053).* A `SignupRecipe` with a real `credential_type` but no
+    configured extraction mechanism (email regex / page selector /
+    client-id / client-secret selector) fell through
+    `signup_and_create_app()`'s branch chain untouched and reached the
+    success return at the bottom with an empty credential dict —
+    `status="provisioned"`, `api_key_ref=None`, nothing actually vaulted.
+    Found live, wiring up a recipe for IPinfo (real signup fields, but the
+    credential page is never reached because of a reCAPTCHA wall — see
+    OPS.md), and it exposed something else on the way: OpenWeatherMap's
+    recipe, registered earlier with the identical shape (no extraction
+    mechanism, also blocked before extraction, D-046), carries a comment
+    claiming a live attempt would produce `PROVISION_FAILED` "with a
+    real, specific reason." Tracing `signup_and_create_app()` as it
+    existed at the time shows that can't be what happened —
+    OpenWeatherMap's registered recipe, run through the real `provision()`
+    pipeline, would have hit this exact bug and silently reported
+    success. The specific reCAPTCHA message the comment quotes must have
+    come from reading the vendor's page directly in a one-off
+    exploratory script, outside the actual pipeline. **The comment
+    documented behavior the code never had, until this fix.**
+
+  All three are fixed and tested now (`test_a_batch_of_n_apps_always_produces_n_artifacts`,
+  the Spotify soft-404 regression test, and
+  `test_recipe_with_no_extraction_mechanism_fails_instead_of_reporting_empty_success`
+  respectively) — named together here because the pattern is worth
+  recognizing on its own: `bool` return values and status enums don't
+  catch this class of bug by construction. `ProvisionOutcome.success:
+  bool` was a perfectly valid `True` even when it meant "I have no idea
+  what happened here." Each of the three was only caught by someone
+  tracing the actual code path by hand against a real run, not by a type
+  checker or a schema. The underlying soft-404 detection specifically is
+  still a hand-maintained keyword list, not a general solution — see
+  "what's next."
 - **The coverage table above is a noisier instrument than a single run
   makes it look, confirmed by running the exact same batch twice.** Two
   full 20-app batch runs, same code, same seed list, back to back:
@@ -286,7 +357,7 @@ has now held across three real runs (`UNSUPPORTED`/`no_public_api`).
 - [`RUNBOOK_MANUAL.md`](RUNBOOK_MANUAL.md) — the human process this
   replaces, step by step, marked with what's automated vs. handed off.
 - [`DECISIONS.md`](DECISIONS.md) — every meaningful technical choice,
-  what was rejected, and why. 48 entries.
+  what was rejected, and why. 53 entries.
 - [`TRACE.md`](TRACE.md) — GitHub, followed end to end, real numbers,
   written to be read aloud.
 - [`OPS.md`](OPS.md) — where this runs, what happens if it dies

@@ -426,18 +426,51 @@ same pre-existing search-provider volatility documented above, not to
 this fix; README's before/after table marks each row accordingly rather
 than crediting D-049 for changes it structurally couldn't have caused.
 
-## What makes a vendor recipe-able: two real vendors, two real outcomes
+## What makes a vendor recipe-able: four real vendors, four real outcomes
 
-Two real `--live` attempts, both against real vendor infrastructure, both
+Four real `--live` attempts, all against real vendor infrastructure, all
 producing definitive, not ambiguous, results:
 
-| | NASA API (`api.nasa.gov`) | OpenWeatherMap (`home.openweathermap.org`) |
-|---|---|---|
-| Signup fields | email, first name, last name | username, email, password, password confirmation, 2 consent checkboxes |
-| Anti-automation defense on the form | none | visible Google reCAPTCHA v2 |
-| Result | provisioned + validated, 21.3s total, first attempt | `PROVISION_FAILED`, confirmed in one attempt: *"reCAPTCHA verification failed, please try again."* |
-| Credential delivery | emailed directly, extracted by regex on the first try | never reached |
-| Login required | no | would have been (unconfirmed -- never reached) |
+| | NASA API (`api.nasa.gov`) | OpenWeatherMap (`home.openweathermap.org`) | Alpha Vantage (`alphavantage.co`) | IPinfo (`ipinfo.io`) |
+|---|---|---|---|---|
+| Signup fields | email, first name, last name | username, email, password, password confirmation, 2 consent checkboxes | organization, email (occupation select left at its default) | first name, last name, email, password |
+| Anti-automation defense on the form | none | visible Google reCAPTCHA v2 | none (confirmed by real DOM/iframe/script inspection) | invisible Google reCAPTCHA v2 (`size=invisible`, auto-executes on submit) |
+| Result | provisioned + validated, 21.3s total, first attempt | `PROVISION_FAILED`, confirmed in one attempt: *"reCAPTCHA verification failed, please try again."* | provisioned + validated, 5.59s total (4.52s provision, 1.07s validate), first attempt | `PROVISION_FAILED` (`no extraction mechanism configured` -- correctly reflects that the credential page was never reached); the real root cause was confirmed separately, by screenshot: submission escalated to a full interactive challenge, *"Select all images with cars"* |
+| Credential delivery | emailed directly, extracted by regex on the first try | never reached | same-page AJAX response, no email step at all, extracted by regex on the first try | never reached |
+| Login required | no | would have been (unconfirmed -- never reached) | no | would have been (unconfirmed -- never reached) |
+
+**IPinfo was chosen specifically to stress-test one open question: does an
+*invisible* reCAPTCHA (behavioral-score-gated, only shown when the score
+says so) behave differently against a well-behaved script than
+OpenWeatherMap's *visible* one (always shown, D-046)?** It doesn't, in
+the one real trial run here: an ordinary headless Chromium session, real
+name/email, a freshly generated password, no retries and no evasion
+attempted, tripped the risk score and got the full interactive challenge
+anyway. This also means the `account_email` + `account_password_ref`
+archetype -- the shape where credforge would create a real account with a
+generated password, not just retrieve a mailed or AJAX-rendered key --
+remains unproven live: IPinfo was the closest real attempt (a genuine
+password field, a real "Log in" link visible on the same page confirming
+a login step exists) and still never got past signup.
+
+**A note on how these two `PROVISION_FAILED` results were actually
+produced, because they look parallel but aren't:** IPinfo's failure
+reason came directly from the real, registered `SignupRecipe` running
+through the real `provision()` pipeline -- generic and structural ("no
+extraction mechanism configured"), because the pipeline itself has no way
+to read *why* signup didn't work, only that it couldn't extract a
+credential. The specific quoted reCAPTCHA message in OpenWeatherMap's row
+above did **not** come from that same code path -- tracing
+`signup_and_create_app()` as it existed at the time shows the registered
+OPENWEATHERMAP recipe has the identical shape as IPinfo's (a real
+`credential_type`, zero extraction selectors), and until D-053 that shape
+fell through to a **false success** with an empty credential, not a
+`PROVISION_FAILED` at all. The quoted message must have come from reading
+the vendor's page directly in a one-off exploratory script, outside
+`provision()`. See the README's grouped write-up of this bug for the full
+account -- D-053 is what makes OpenWeatherMap's own recipe comment ("the
+failure is `PROVISION_FAILED` with a real, specific reason") actually
+true today, when it wasn't when it was written.
 
 **The distinction that actually decided the outcome, isolated on
 purpose:** before submitting anything to OpenWeatherMap live, every field
@@ -451,33 +484,49 @@ the vendor's own anti-automation control did exactly its job." Those are
 different findings, and only one of them is fixable by writing better
 automation.
 
-**Recipe-able, based on what was actually observed across both vendors:**
+**Recipe-able, based on what was actually observed across all four vendors:**
 
 - **The signup form is real HTML with stable selectors** -- whether
   server-rendered (OpenWeatherMap's Rails-style `simple_form`) or
   injected by third-party JS after page load (NASA's `api_umbrella`
   embed widget, D-042) doesn't matter; Playwright can wait for and read
   either. What matters is that the *resulting* DOM has real, addressable
-  elements -- not that the markup was present on page load.
+  elements -- not that the markup was present on page load. Alpha
+  Vantage's framework-generated selectors were stable within a page load
+  too; only IPinfo's per-load-random `id`s (Headless UI/Next.js) forced
+  falling back to the `name` attribute instead, still a stable, real
+  selector, just a different one.
 - **The credential delivery mechanism is mechanical, not adversarial.**
   NASA emails the key directly, in a predictable format, with no human
   judgment call involved on the vendor's side. A regex against a real
   email body is a completely reliable extraction mechanism *when nothing
-  upstream of it required a human first.*
+  upstream of it required a human first.* Alpha Vantage confirms this
+  generalizes past email specifically: its key renders into the page via
+  AJAX a few hundred milliseconds after submit, with no email step at
+  all (D-052) -- a third, distinct delivery shape, and just as
+  mechanical as NASA's regex-on-an-email-body once the extraction logic
+  knows to poll for the pattern instead of assuming an email is coming.
 - **There is no active challenge designed specifically to distinguish a
   human from a script.** A required checkbox, a required field, even a
   multi-step form -- all mechanical, all just "more selectors to fill
   correctly." None of these are adversarial; they don't get *harder* to
   automate the more precisely you automate them.
 
-**Not recipe-able, based on the same two data points:**
+**Not recipe-able, based on the same four data points:**
 
-- **Any real CAPTCHA (reCAPTCHA, hCaptcha, or similar), full stop.** This
-  is the one category this project's own constraints already rule out
+- **Any real CAPTCHA (reCAPTCHA, hCaptcha, or similar), full stop --
+  confirmed for both the visible and invisible variants.** This is the
+  one category this project's own constraints already rule out
   attempting to defeat (detection evasion is out of scope on principle,
   not just difficulty), so "not recipe-able" here isn't "harder than the
-  other one" -- it's categorical. No amount of better selector-finding
-  closes this gap; it isn't a selector problem.
+  other one" -- it's categorical. OpenWeatherMap (visible, always-shown
+  reCAPTCHA v2) and IPinfo (invisible, risk-score-gated reCAPTCHA v2)
+  were two different bets on where the actual line might be -- an
+  invisible challenge that only appears when the score says so is, in
+  principle, a different, possibly weaker control than one that's always
+  there. It wasn't weaker in practice: an ordinary, non-evasive headless
+  session tripped it anyway. No amount of better selector-finding closes
+  this gap; it isn't a selector problem.
 - By extension (not directly observed this session, but the same
   category): **SMS/phone verification, and any step that requires
   receiving something on a channel credforge has no access to** --
