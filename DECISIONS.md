@@ -2603,3 +2603,244 @@ network, no vendor dependency) with a recipe that has a real
 `credential_type` and no extraction selectors, and asserts the outcome is
 an explicit failure with an empty credential -- not a silent success.
 214/214 tests pass including this one.
+
+### D-054: A new failure class -- the artifact contradicting itself, not failing silently. Source tier is now computed exactly once, in DISCOVER, from the URL that's actually used
+
+**A different bug shape than D-050/D-051/D-053, worth naming as its own
+class:** every prior fix this run has caught the pipeline claiming
+*success it hadn't earned* (an empty credential reported as
+"provisioned," an app silently dropped from a batch's count, a soft-404
+cleared to `AUTO`). This one is not that. A real Linear run produced a
+*complete, internally consistent-looking* artifact that nonetheless
+asserted two different things about the same fact: the evidence array
+said *"docs source selected: HIGH-tier ('developers' subdomain)"*, and
+`api.source_tier` said `"low"`. Neither claim was individually wrong in
+isolation -- each was computed correctly from *some* input -- the bug is
+that there were two separate computations of "the tier of this run's docs
+page" and nothing forced them to agree.
+
+**Root cause, traced to two distinct, compounding bugs, not one:**
+
+1. **A stale pre-redirect description.** `_rank_and_verify_docs_candidates()`
+   (resolve.py) fetched each candidate `url`, then computed
+   `tier_desc = describe_tier_match(url)` -- the *pre-redirect* URL --
+   but stored that reason against `fetched.final_url`, the *post-redirect*
+   URL, whenever they differed. Linear's real conventional guess
+   `https://developer.linear.app` (a HIGH-tier subdomain) redirects to
+   `https://linear.app/developers` (a path) -- RESOLVE recorded "HIGH-tier
+   ('developer' subdomain)" as the reason for a URL that was never
+   actually a subdomain at all.
+2. **A real asymmetry in the tier rule itself**, which is what turned
+   bug #1 from a cosmetic mislabel into an actual tier mismatch:
+   `_HIGH_PATH_SEGMENTS` recognized `/api`, `/reference`,
+   `/api-reference`, `/rest` as HIGH-tier paths, but not `/developer` or
+   `/developers` -- even though the *subdomain* form
+   (`developer(s).example.com`) already earned HIGH. `/docs` had its own
+   MEDIUM-tier path entry; the developer(s) path form had none at all.
+   `https://linear.app/developers` -- the real, final URL -- therefore
+   fell all the way through to LOW under the old rule, independently of
+   bug #1.
+3. **CLASSIFY then independently recomputed the tier a second time**,
+   from `state.discovery.docs_url` (the URL DISCOVER actually settled
+   on, D-028) -- correctly, on its own terms, but from a URL that could
+   differ from whatever RESOLVE's evidence-building had already committed
+   to text. Two correct computations, two different inputs, one artifact.
+
+**Fixed, three parts:**
+
+- **Rule symmetry** (`pipeline/source_authority.py`): `_HIGH_PATH_SEGMENTS`
+  now includes `developer`, `developers`, `api-docs`, `rest-api` alongside
+  the existing `api`/`reference`/`api-reference`/`rest` -- a vendor whose
+  real docs live at `/developers` (a path) is exactly as official as one
+  at `developers.*` (a subdomain); which shape a vendor happens to use
+  was never itself a signal of authority.
+- **Tier description now reads the post-redirect URL**
+  (`_verify_one_candidate`, resolve.py): `describe_tier_match(fetched.final_url)`,
+  not `describe_tier_match(url)` -- the reason always describes the exact
+  URL it's stored against.
+- **Single source of truth, end to end** (`pipeline/discover.py`,
+  `models/state.py`): `source_tier`/`source_tier_reason` are computed
+  exactly once, in `discover()`, from whichever `docs_url` this stage
+  actually settles on -- the same URL that becomes `api.docs_url`.
+  `DiscoveryResult` carries both fields. `classify()` no longer calls
+  `classify_source_tier()` at all; it takes `source_tier` as a parameter
+  and asserts it's set whenever `has_public_api` is true. EMIT's
+  "docs source selected" evidence item now reads
+  `state.discovery.source_tier_reason`, never
+  `state.resolve.chosen.docs_url_reason` (which still exists, and is
+  still accurate for RESOLVE's own internal ranking/explain-log purposes
+  -- it just no longer feeds the artifact). The evidence item's `claim`
+  and `snippet` are also no longer the same string repeated (a real,
+  separate, minor bug caught in the same pass): `snippet` is now a real
+  200-character quote from `discovery.docs_text`, matching every other
+  evidence item's shape.
+
+**Rejected: "compute source tier once, in RESOLVE" (the fix as first
+proposed).** RESOLVE ranks and content-verifies candidates before
+DISCOVER ever runs, but it does not know which candidate DISCOVER will
+actually settle on -- DISCOVER falls back through RESOLVE's ranked list
+when the top pick isn't reachable or doesn't pan out (D-028), *and*
+appends its own conventional subdomain/path guesses that were never in
+RESOLVE's list at all (`_candidate_list` in discover.py). Computing the
+tier once in RESOLVE and having CLASSIFY read it verbatim would have
+been correct only when DISCOVER's fallback never triggers -- silently
+reintroducing a narrower version of the exact bug this fix exists to
+remove, for any app where D-028's fallback actually fires. Computing it
+once in DISCOVER, at the point the real, final `docs_url` is known, is
+the version of "single source of truth" that's actually true for every
+app, not just the common case.
+
+**Measured live, re-running Linear after the fix:** the evidence array
+and `api.source_tier` now agree (`HIGH`) -- confirmed directly, not by
+inspection of the code alone. The corrected adjusted confidence (0.6 raw
++ 0.05 HIGH bonus = 0.65) does clear `CONFIDENCE_THRESHOLD` (0.6) --
+`CLASSIFY_LOW_CONFIDENCE` no longer fires for Linear. **This was not a
+false HITL, though**: GATE's own ToS check independently finds Linear's
+real terms state *"Customer will pay for access to and use of the
+Service"* -- `requires_payment` fires regardless of CLASSIFY's
+confidence, and Linear correctly lands on HITL either way. What the bug
+actually cost, concretely: before this fix, `classify.reason_code ==
+CLASSIFY_LOW_CONFIDENCE` short-circuits `gate()` *before* its ToS/payment
+signal collection ever runs (gate.py's precondition check, ordered before
+D-040's cross-source scan) -- so the artifact a human would have actually
+seen said `reason_code: classify_low_confidence` ("credforge wasn't
+confident enough," implying a re-run might help) instead of the real,
+correct, and immutable `reason_code: requires_payment` ("Linear is a paid
+API, full stop"). Same final status, materially different and less
+actionable reason -- itself a smaller instance of the same "artifact
+asserts something that isn't quite true" family this entry exists to
+name, not a coincidence.
+
+**Verified:** `tests/unit/test_source_authority.py::test_high_tier_developer_path_matches_the_developer_subdomain_symmetrically`
+and `test_high_tier_api_docs_and_rest_api_paths` cover the rule fix;
+`tests/pipeline/test_resolve.py::test_docs_url_reason_describes_the_post_redirect_url_not_the_pre_redirect_guess`
+reproduces the exact redirect-mismatch shape with a fake fetch whose
+`final_url` differs from the requested `url`; `tests/pipeline/test_emit.py::test_evidence_tier_never_contradicts_the_api_block_tier`
+is parametrized across all three tiers with RESOLVE's own
+`docs_url_reason` deliberately set to the *wrong* tier, proving EMIT
+never reads it for this claim regardless of what it says.
+
+### D-055: `api_style` (REST/GraphQL/unknown) -- the schema assumes REST, and that's now an honest, visible limitation instead of a silent one
+
+**Decided:** DISCOVER now classifies whichever API it actually crawled as
+`ApiStyle.REST`, `GRAPHQL`, or `UNKNOWN` (`enums.py`), via a cheap
+keyword heuristic (`_detect_api_style` in `discover.py`, checking the
+docs URL and the first 5000 characters of crawled text for markers like
+`/graphql` / `"graphql api"` vs. `"rest api"` / `/openapi` / `swagger`)
+-- not an LLM call, matching every other cheap-heuristic-first pattern in
+this stage (soft-404 detection, negative-signal filtering). `UNKNOWN` is
+the deliberately conservative default: it changes nothing about existing
+behavior, unlike a *confirmed* `GRAPHQL` classification. The field is
+carried on `DiscoveryResult` and surfaced on the artifact's `ApiInfo.api_style`.
+
+**Found live, running Linear:** credforge's schema was built assuming
+REST throughout -- `base_url` + resource paths, a `validation_endpoint`
+VALIDATE always resolves as a bare "METHOD /path" and always checks with
+a plain GET (pipeline/validate.py, D-032). Linear's real API is GraphQL:
+one endpoint, cursor-based Relay connections, no REST-style multi-path
+shape at all. `gate.py`'s `_completeness_gaps()` was reporting missing
+`pagination_style_hint` and `validation_endpoint` as if they were
+ordinary extraction misses on a REST vendor, when for a GraphQL vendor
+neither field's *current design* has real meaning to miss.
+
+**Fix, deliberately narrow (`Don't over-engineer this`):** only two of
+the five tracked completeness fields are treated as REST-specific and
+suppressed for a confirmed GraphQL API --
+`pagination_style_hint` (a prose hint the extractor looks for in
+REST-shaped terms: query params, page numbers -- not Relay's
+`pageInfo`/`endCursor` shape) and `validation_endpoint` (consumed by
+VALIDATE as a path resolved against `base_url` with an always-GET
+request, which has no meaning for a GraphQL API's single
+POST-with-a-query-body endpoint). `base_url`, `developer_portal_url`, and
+`rate_limit_notes` stay universal -- a GraphQL vendor has exactly one of
+the first and (usually) real prose about the other two; a missing one is
+still a real, actionable gap, not a REST assumption. Linear's own real
+run had zero completeness gaps regardless (DISCOVER's extraction found
+every field), so this specific suppression wasn't exercised by the live
+run that motivated it -- verified instead by a direct unit test
+(`tests/pipeline/test_gate.py::test_graphql_api_style_suppresses_only_the_rest_specific_completeness_gaps`)
+constructing the missing-fields case directly.
+
+**Rejected: teaching VALIDATE to actually validate a GraphQL
+credential** (a POST with an introspection or cheap query body, instead
+of the current always-GET). Real, worthwhile future work, but a
+materially bigger change than "stop reporting a false gap" -- explicitly
+out of scope per "don't over-engineer this." Documented as a known,
+honest limitation (see README) rather than silently left unmentioned:
+credforge's schema and VALIDATE both currently assume REST; GraphQL is
+discovered and classified correctly, but a GraphQL AUTO app would still
+fail VALIDATE today.
+
+**Rejected: an LLM call to classify API style.** The two-marker-set
+heuristic is enough to catch the common, explicit case (a vendor's own
+docs almost always say "GraphQL" or "REST API" somewhere prominent, or
+the URL itself names it, as Linear's `/developers/graphql` does) without
+spending an extra extraction call on every app just to set one field
+that's `UNKNOWN`-safe by default when it can't tell.
+
+### D-056: RESOLVE's docs-candidate probes now run with bounded concurrency -- a real, but smaller-than-hoped-for, latency win
+
+**Decided:** `_rank_and_verify_docs_candidates()` (resolve.py) now
+fetches every filtered, tier-sorted candidate through `asyncio.gather`
+under a `asyncio.Semaphore(5)` bound, instead of `await`-ing each one in
+a strict `for` loop. `asyncio.gather` preserves input order in its
+results regardless of completion order, so the existing
+tier-then-search-rank ordering is unaffected -- this is a pure
+concurrency change, not a ranking change.
+
+**Measured, honestly, and the result is smaller than "parallelize a
+sequential loop" usually implies:** every candidate `_rank_and_verify_docs_candidates`
+fetches targets the *same* app's registrable domain (RESOLVE filters
+search hits to `registrable_domain(r.url) == domain` and adds only
+same-domain conventional guesses) -- and `net/rate_limiter.py`'s
+`DomainRateLimiter` keys its token bucket by registrable domain too
+(`HttpxFetchProvider.fetch()`, confirmed by reading the call site). At
+the default `0.5 req/sec, burst=2` (no per-domain overrides are actually
+configured anywhere in this codebase today), every candidate for a
+single app shares one bucket -- concurrent requests to it still acquire
+their token one at a time, so parallelizing the *loop* does not
+parallelize the *rate limit itself*, by design (the user's own
+instruction: "respecting the per-domain rate limiter"). Real
+before/after, git-worktree-isolated (old code at commit `323e2b5`, new
+code current), same real DDG search/fetch calls:
+
+| app | before | after | candidates verified (before -> after) |
+|---|---|---|---|
+| Linear | 42.88s | 34.52s | 4 -> 3 |
+| Stripe | 40.14s | 36.80s | 3 -> 1 |
+| GitHub | 41.32s | 50.80s | 2 -> 6 |
+
+**Read with the confound stated plainly, not hidden:** candidate *count*
+differs before vs. after for every app above -- real DDG search-result
+variance (the same run-to-run volatility this project has documented
+since Stage 4/8, unrelated to this change) means the before and after
+runs are not doing identical amounts of work. GitHub's *after* run is
+slower in raw wall-clock despite the fix, purely because it had three
+times as many real candidates to verify. Normalizing to seconds-per-
+verified-candidate (a fairer, though still imperfect, unit): Linear
+10.7s/candidate -> 11.5s/candidate (flat, within noise -- consistent with
+every candidate sharing one maximally-serialized bucket regardless of
+concurrency); Stripe 13.4s/candidate -> 36.8s/candidate (the *after* run
+had exactly one candidate -- concurrency has nothing to overlap with one
+item, so this is the expected floor case, not a regression); GitHub
+20.7s/candidate -> 8.5s/candidate (a real, meaningful drop -- the case
+with the most candidates to overlap shows the clearest win). **Honest
+summary: the fix is real and measurably helps when there's more than a
+handful of same-domain candidates to check, but the shared per-domain
+rate limiter -- by design, and per the explicit instruction to respect it
+-- caps how much it can ever help, and an isolated single before/after
+run per app is too noisy on its own to prove the effect size cleanly.**
+
+**Rejected: raising the per-domain rate limit specifically for
+RESOLVE's docs-probing phase.** Would unlock more of the theoretical
+concurrency win, but changes real outbound request pacing against
+vendor infrastructure -- a defaults change with a different risk profile
+(politeness/abuse-avoidance, D-007) than a pure code-concurrency change,
+and out of scope for what was asked here.
+
+**Verified:** `tests/pipeline/test_resolve.py::test_docs_candidate_probes_run_concurrently_not_strictly_sequentially`
+uses five candidates with a simulated 100ms round-trip each and asserts
+both real overlap (`max_in_flight > 1`) and a wall-clock ceiling
+(<300ms) that a strictly sequential loop could not meet (>=500ms) --
+proves the concurrency mechanism itself, independent of the rate
+limiter's separate, dominant effect measured above.

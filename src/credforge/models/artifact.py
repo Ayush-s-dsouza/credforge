@@ -16,7 +16,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..enums import AuthScheme, CredentialType, ReasonCode, SourceTier, Status
+from ..enums import ApiStyle, AuthScheme, CredentialType, ReasonCode, SourceTier, Status
 from .state import CompletenessGap, EvidenceItem
 
 
@@ -43,6 +43,13 @@ class ApiInfo(BaseModel):
     # D-049) -- was computed by CLASSIFY all along but never previously
     # exposed anywhere in the artifact itself, only in-process.
     classify_confidence: float | None = None
+    # REST vs. GraphQL vs. unknown (D-055) -- credforge's schema
+    # (base_url + path-shaped validation_endpoint, REST-only VALIDATE)
+    # assumes REST by default; this field is what lets a consumer -- and
+    # GATE's own completeness-gap reporting -- know when that assumption
+    # doesn't hold, rather than silently applying REST-shaped expectations
+    # to a GraphQL vendor.
+    api_style: ApiStyle | None = None
 
 
 class CredentialInfo(BaseModel):

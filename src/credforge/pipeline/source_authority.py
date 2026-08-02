@@ -24,12 +24,19 @@ from ..utils.domains import subdomain_of
 
 _TIER_RANK = {SourceTier.HIGH: 0, SourceTier.MEDIUM: 1, SourceTier.LOW: 2}
 
-# Official API references: a dedicated reference/rest path, or a
-# developer(s).* subdomain. Deliberately does NOT include a bare "api.*"
-# subdomain -- that's frequently an API *endpoint* domain (base_url), not
-# a docs page, and treating it as automatic HIGH-tier docs authority
-# would be a category error.
-_HIGH_PATH_SEGMENTS = frozenset({"api", "reference", "api-reference", "rest"})
+# Official API references: a dedicated reference/rest/developer(s) path,
+# or a developer(s).* subdomain -- deliberately symmetric: a vendor whose
+# real docs live at "example.com/developers" (a path) is exactly as
+# official as one at "developers.example.com" (a subdomain); which shape
+# a vendor happens to use is not itself a signal of authority. This
+# symmetry was missing for one real run (Linear's real docs live at
+# "linear.app/developers", a path) -- see DECISIONS.md D-054. Deliberately
+# does NOT include a bare "api.*" subdomain -- that's frequently an API
+# *endpoint* domain (base_url), not a docs page, and treating it as
+# automatic HIGH-tier docs authority would be a category error.
+_HIGH_PATH_SEGMENTS = frozenset(
+    {"api", "reference", "api-reference", "rest", "developer", "developers", "api-docs", "rest-api"}
+)
 _HIGH_SUBDOMAIN_PREFIXES = ("developer",)  # matches "developer" and "developers"
 
 # Could be real API docs, could be a general user guide -- worth trying
@@ -44,8 +51,9 @@ def _path_segments(url: str) -> set[str]:
 
 
 def classify_source_tier(url: str) -> SourceTier:
-    """HIGH: official API reference (path segment api/reference/api-reference/rest,
-    or a developer(s).* subdomain). MEDIUM: general docs/guide (path segment
+    """HIGH: official API reference (path segment api/reference/api-reference/
+    rest/developer/developers/api-docs/rest-api, or a developer(s).*
+    subdomain). MEDIUM: general docs/guide (path segment
     docs/guide/guides, or a docs.* subdomain). LOW: everything else --
     blogs, tutorials, third-party write-ups, community forums, Stack
     Overflow, Medium. Checks every path segment, not just the first --

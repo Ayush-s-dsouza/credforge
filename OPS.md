@@ -576,3 +576,112 @@ better automation removes -- which is exactly the distinction the
 VENDOR_BLOCKED / PIPELINE_LIMITED split (see README) was already drawing
 from the policy side; OpenWeatherMap is the same distinction observed
 from the provisioning side, live, for real.
+
+## A live Linear run: a self-contradicting artifact, and what RESOLVE's real latency is actually spent on
+
+A real `credforge run "Linear" --dry-run --explain` surfaced three
+findings of three different kinds -- a real correctness bug, a real
+modelling gap, and a real (but smaller than hoped) performance fix. All
+three are covered in full in DECISIONS.md (D-054, D-055, D-056); this
+section is the measured-numbers record.
+
+**The bug (D-054):** the artifact's evidence array said *"docs source
+selected: HIGH-tier ('developers' subdomain)"*; `api.source_tier` said
+`"low"` -- two contradictory claims about the same run's docs page, not
+a silent omission. Root cause was two compounding bugs, not one: RESOLVE
+described a candidate's tier from its pre-redirect URL but stored the
+description against the post-redirect URL whenever a conventional guess
+(`developer.linear.app`) redirected somewhere else
+(`linear.app/developers`); separately, the tier rule itself was
+asymmetric -- `/developer(s)` was a recognized HIGH-tier *subdomain* but
+not a recognized HIGH-tier *path*, unlike `/docs`, which had both forms.
+Fixed by computing the tier exactly once, in DISCOVER, from the real
+`docs_url` this stage settles on, with CLASSIFY and EMIT both reading
+that one stored value instead of each computing their own.
+
+**Re-run live after the fix**, full pipeline, dry-run:
+
+```
+[resolve] confirmed docs_url=https://linear.app/developers/graphql
+  (HIGH-tier (path segment 'developers'); matched content markers:
+  \bauthenticat(e|ion)\b, \bauthoriz(e|ation)\b, \bendpoints?\b)
+[discover] crawled https://linear.app/developers/graphql; has_public_api=True,
+  base_url=https://api.linear.app/graphql
+[classify] auth_scheme=api_key raw_confidence=0.6 source_tier=high
+  adjusted_confidence=0.65
+[gate] blocked by gate check: requires_payment
+
+status: HITL
+reason_code: requires_payment
+source_tier: high  (matches the evidence array -- no longer contradicts it)
+classify_confidence: 0.65
+api_style: graphql
+completeness_gaps: []
+```
+
+**Was this a false HITL?** No. The corrected confidence (0.65) clears
+`CONFIDENCE_THRESHOLD` (0.6) -- `CLASSIFY_LOW_CONFIDENCE` no longer
+fires. But GATE's own ToS check independently finds Linear's real terms
+state *"Customer will pay for access to and use of the Service ... as
+set forth on the applicable Order"* -- `requires_payment` fires
+regardless, and Linear correctly stays HITL. What the bug actually cost:
+`gate()`'s precondition check short-circuits on
+`CLASSIFY_LOW_CONFIDENCE` *before* its own ToS/payment signal collection
+ever runs -- so the artifact a human would have seen before this fix
+said `reason_code: classify_low_confidence` (reads as "credforge wasn't
+confident enough," implying a re-run might help) instead of the real,
+correct, immutable `reason_code: requires_payment` ("Linear is a paid
+API"). Same status, a meaningfully less actionable and less true reason.
+
+**The modelling gap (D-055):** Linear is GraphQL -- one endpoint,
+cursor-based Relay connections, no REST-style multi-path shape.
+`api_style` (`rest`/`graphql`/`unknown`, a cheap URL/text keyword
+heuristic, not an LLM call) is now recorded, and GATE suppresses the two
+completeness-gap fields whose current design is REST-specific
+(`pagination_style_hint`, `validation_endpoint` -- VALIDATE always
+resolves the latter as a path against `base_url` with a plain GET, which
+has no meaning for GraphQL's single POST-with-a-query-body endpoint) when
+the API is confirmed GraphQL. Linear's own real run had zero completeness
+gaps regardless (DISCOVER's extraction found every field) -- the
+suppression logic itself is verified by a direct unit test constructing
+the missing-fields case, not by this particular live run. Deliberately
+not fixed, per "don't over-engineer this": VALIDATE still cannot actually
+check a GraphQL credential (it always issues a GET against a resolved
+path; GraphQL needs a POST with a query body) -- a GraphQL app reaching
+AUTO today would still fail VALIDATE. Discovered and classified
+correctly; not yet provisionable end-to-end.
+
+**The latency fix (D-056), measured honestly:** `_rank_and_verify_docs_candidates()`
+now fetches its ranked candidates through `asyncio.gather` under a
+`Semaphore(5)` bound, instead of a strict sequential `for` loop. Real,
+git-worktree-isolated before/after (old code at commit `323e2b5`, current
+code after; both against real DDG search + real fetches, no mocking):
+
+| app | before | after | candidates verified (before → after) | before, s/candidate | after, s/candidate |
+|---|---|---|---|---|---|
+| Linear | 42.88s | 34.52s | 4 → 3 | 10.72 | 11.51 |
+| Stripe | 40.14s | 36.80s | 3 → 1 | 13.38 | 36.80 |
+| GitHub | 41.32s | 50.80s | 2 → 6 | 20.66 | 8.47 |
+
+Raw wall-clock is confounded by real DDG search-result-count variance
+(GitHub's *after* run had three times as many real candidates to verify
+than its *before* run -- the same run-to-run volatility this document has
+documented since Stage 4/8, unrelated to this change) -- the
+seconds-per-verified-candidate column is the fairer comparison, and it's
+mixed, for a real, structural reason: every candidate for one app's docs
+discovery targets the *same* registrable domain, and
+`net/rate_limiter.py`'s `DomainRateLimiter` keys its token bucket by
+registrable domain too (confirmed by reading `HttpxFetchProvider.fetch()`'s
+call site) -- at the default `0.5 req/sec, burst=2` (no per-domain
+overrides exist anywhere in this codebase today), concurrent requests to
+the same domain still acquire their token one at a time. Linear's
+per-candidate cost is flat (consistent with maximal serialization on one
+shared bucket regardless of concurrency); Stripe's *after* run had
+exactly one candidate, so there was nothing to overlap; GitHub, with the
+most candidates to overlap, shows a real, meaningful per-candidate drop.
+**Honest summary: the fix is real and helps meaningfully once there's
+more than a handful of same-domain candidates to check in one RESOLVE
+call, but the shared per-domain rate limiter -- respected by design, per
+the explicit instruction not to bypass it -- caps how much it can ever
+help, and one isolated before/after run per app is too noisy to prove the
+effect size cleanly on its own.**

@@ -1,3 +1,5 @@
+import asyncio
+import time
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
@@ -7,6 +9,7 @@ from credforge.enums import ReasonCode
 from credforge.models.state import ResolveResult
 from credforge.pipeline.resolve import (
     DOCS_URL_CONFIDENCE_BOOST,
+    _rank_and_verify_docs_candidates,
     _score_candidates,
     resolve,
 )
@@ -294,6 +297,78 @@ async def test_docs_url_reason_is_recorded_for_auditability() -> None:
     # but the "rest" path segment is a real, official-reference signal (D-049).
     assert "HIGH-tier" in result.chosen.docs_url_reason
     assert "'rest'" in result.chosen.docs_url_reason
+
+
+@pytest.mark.asyncio
+async def test_docs_url_reason_describes_the_post_redirect_url_not_the_pre_redirect_guess() -> None:
+    # D-054, the real bug: a conventional subdomain guess
+    # ("developer.widgetco.com", HIGH-tier) redirects to a final URL
+    # ("widgetco.com/help/api-info", LOW-tier -- no HIGH/MEDIUM path
+    # signal) that is NOT the same tier. Before the fix, the reason was
+    # computed on the pre-redirect guess and stored against
+    # `fetched.final_url` regardless -- describing a URL that isn't the
+    # one actually returned. The reason must describe the URL that's
+    # actually stored (`docs_url`/`docs_url_candidates[0]`), matching
+    # whatever tier that same URL gets when CLASSIFY independently scores
+    # it later.
+    search = FakeSearchProvider(
+        {
+            "Widgetco official website": [
+                SearchResult(title="Widgetco", url="https://widgetco.com/", snippet="...", rank=1),
+            ],
+            "Widgetco developer API documentation": [],
+        }
+    )
+    fetch = FakeFetchProvider(
+        {
+            "https://developer.widgetco.com": FetchResult(
+                url="https://developer.widgetco.com",
+                final_url="https://widgetco.com/help/api-info",
+                status_code=200,
+                content_type="text/html",
+                text=_API_DOCS_LIKE_TEXT,
+                fetched_at=datetime.now(timezone.utc),
+            ),
+        }
+    )
+
+    result = await resolve("Widgetco", search=search, fetch=fetch)
+
+    assert result.chosen.docs_url == "https://widgetco.com/help/api-info"
+    assert "LOW-tier" in result.chosen.docs_url_reason
+    assert "HIGH-tier" not in result.chosen.docs_url_reason
+
+
+@pytest.mark.asyncio
+async def test_docs_candidate_probes_run_concurrently_not_strictly_sequentially() -> None:
+    # D-056: five candidates, each simulating a 100ms round-trip. If they
+    # ran one at a time (the old behavior), this takes >=500ms; bounded
+    # concurrency (cap of 5, so all fit in one batch) should overlap them,
+    # finishing close to 100ms. A generous 300ms ceiling leaves headroom
+    # for scheduler jitter while still failing loudly if a future change
+    # reintroduces strict sequential awaiting.
+    urls = [f"https://example{i}.com/api/reference" for i in range(5)]
+
+    class DelayedFetch:
+        def __init__(self) -> None:
+            self.in_flight = 0
+            self.max_in_flight = 0
+
+        async def fetch(self, url: str, *, method: str = "GET", headers=None) -> FetchResult:
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+            await asyncio.sleep(0.1)
+            self.in_flight -= 1
+            return _ok(url)
+
+    fetch = DelayedFetch()
+    start = time.monotonic()
+    verified = await _rank_and_verify_docs_candidates(urls, fetch=fetch)
+    elapsed = time.monotonic() - start
+
+    assert len(verified) == 5
+    assert elapsed < 0.3, f"probes ran too slowly ({elapsed:.2f}s) -- looks sequential, not concurrent"
+    assert fetch.max_in_flight > 1, "no overlap observed -- fetches never ran concurrently"
 
 
 @pytest.mark.asyncio

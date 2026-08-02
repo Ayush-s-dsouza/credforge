@@ -240,6 +240,34 @@ what's recipe-able vs. not, and why, in
   checker or a schema. The underlying soft-404 detection specifically is
   still a hand-maintained keyword list, not a general solution — see
   "what's next."
+- **A different failure class from the three above: the artifact
+  contradicting itself, not failing silently (D-054).** A real Linear run
+  produced an artifact that asserted two different things about the same
+  fact — the evidence array said *"docs source selected: HIGH-tier
+  ('developers' subdomain)"*; `api.source_tier` said `"low"`. Neither
+  claim was individually wrong for the input it was computed from — the
+  bug was that there were two separate computations of "the tier of this
+  run's docs page," and nothing forced them to agree. Root cause, two
+  compounding bugs: RESOLVE described a candidate's tier from its
+  *pre-redirect* URL but stored the reason against the *post-redirect*
+  one (Linear's real `developer.linear.app` guess redirects to
+  `linear.app/developers`), and separately, the tier rule itself was
+  asymmetric — `/developer(s)` was recognized as a HIGH-tier *subdomain*
+  but not as a HIGH-tier *path*, even though `/docs` had its own
+  MEDIUM-tier path entry. Fixed by computing the tier exactly once, in
+  DISCOVER, from whichever `docs_url` it actually settles on — the same
+  URL that becomes `api.docs_url` — and having CLASSIFY and EMIT both
+  read that one value instead of each computing their own. Re-run live
+  after the fix: evidence and `api.source_tier` now agree, and the
+  corrected confidence (0.65) clears `CLASSIFY_LOW_CONFIDENCE` — but
+  Linear still lands on HITL, because its real terms independently
+  require payment. Not a false HITL, but the bug did cost something real:
+  before the fix, `CLASSIFY_LOW_CONFIDENCE` short-circuits GATE before
+  its own ToS check ever runs, so the artifact would have said "credforge
+  wasn't confident enough" instead of the true, immutable "Linear is a
+  paid API." Full account, including the rejected "compute it once in
+  RESOLVE" design (wrong — RESOLVE doesn't yet know which candidate
+  DISCOVER will settle on), in DECISIONS.md D-054.
 - **The coverage table above is a noisier instrument than a single run
   makes it look, confirmed by running the exact same batch twice.** Two
   full 20-app batch runs, same code, same seed list, back to back:
@@ -297,6 +325,45 @@ what's recipe-able vs. not, and why, in
   rather than genuine ambiguity. Brave is a one-env-var swap
   (`BRAVE_API_KEY`) but requires a card on file, which is exactly the
   constraint that made DDG the default in the first place (D-024).
+- **RESOLVE's docs-candidate probes now run with bounded concurrency
+  (D-056), and the honest result is a smaller win than "parallelize a
+  sequential loop" usually implies.** Every candidate for one app's docs
+  discovery targets the *same* registrable domain, and `net/rate_limiter.py`'s
+  `DomainRateLimiter` keys its token bucket by registrable domain too (no
+  per-domain overrides are configured anywhere in this codebase today,
+  just the `0.5 req/sec, burst=2` default) — concurrent requests to the
+  same domain still acquire their token one at a time, so parallelizing
+  the loop does not parallelize the rate limit itself, by design (the
+  limiter must still be respected). Real, git-worktree-isolated
+  before/after on three apps: Linear 42.88s → 34.52s, Stripe 40.14s →
+  36.80s, GitHub 41.32s → 50.80s (slower in raw wall-clock, but its
+  *after* run had three times as many real candidates to verify — DDG's
+  real result-count variance confounds any single isolated run). Per
+  verified candidate, a fairer unit: Linear roughly flat (10.7s → 11.5s —
+  consistent with every candidate sharing one maximally-serialized
+  bucket), Stripe worse (13.4s → 36.8s/candidate, but the *after* run had
+  exactly one candidate — nothing to overlap with), GitHub clearly better
+  (20.7s → 8.5s/candidate). The fix is real and helps most when there's
+  more than a handful of same-domain candidates to check; the shared
+  rate limiter caps how much it can ever help, by design, and one
+  before/after run per app is too noisy to prove the effect size
+  cleanly. Full numbers and the concurrency-mechanism test in
+  DECISIONS.md D-056.
+- **The artifact schema assumes REST; GraphQL is only partially
+  modelled, and that's now visible rather than silently wrong (D-055).**
+  DISCOVER classifies whichever API it crawled as `api_style`
+  (`rest`/`graphql`/`unknown`, a cheap keyword heuristic, not an LLM
+  call) and GATE now suppresses the two completeness-gap fields whose
+  *current design* is REST-specific (`pagination_style_hint`, a prose
+  hint phrased in REST terms; `validation_endpoint`, which VALIDATE
+  always resolves as a path against `base_url` and always checks with a
+  plain GET) when the API is confirmed GraphQL. What this does *not* fix,
+  deliberately, per "don't over-engineer this": VALIDATE still cannot
+  actually validate a GraphQL credential — a real GraphQL check needs a
+  POST with a query body, not a GET against a resource path. A GraphQL
+  app that reaches `AUTO` today would still fail VALIDATE. Discovered and
+  classified correctly; not yet provisionable end-to-end. Worth building,
+  not yet built.
 - **The chaos properties described in the original build plan are real,
   passing tests — but scattered across the normal test suite, not
   consolidated into the dedicated `tests/chaos/` directory the plan

@@ -23,16 +23,46 @@ instead of a clean, correct UNSUPPORTED.
 DISCOVER only reports facts -- it's GATE's job to decide what an
 incomplete or missing result means for the final status, not this stage's
 (see DECISIONS.md D-029).
+
+Whichever docs_url this stage actually settles on, its source tier
+(D-049) and API style (D-055, REST/GraphQL/unknown) are computed exactly
+once, here, and carried on the result -- CLASSIFY and EMIT both read
+these fields instead of recomputing them from a possibly-different URL.
+See DECISIONS.md D-054 for the real bug this replaced.
 """
 
-from ..enums import PipelineStage, ReasonCode
+from ..enums import ApiStyle, PipelineStage, ReasonCode
 from ..models.state import DiscoveryResult
 from ..providers.fetch import FetchException, FetchProvider
 from ..providers.llm import Extractor
 from .explain import NULL_EXPLAIN, ExplainEvent, ExplainSink
+from .source_authority import classify_source_tier, describe_tier_match
 
 _DOCS_SUBDOMAIN_GUESSES = ("docs", "developer", "developers")
 _MIN_USABLE_TEXT_LENGTH = 200
+
+# D-055: cheap, deterministic keyword signals -- not an LLM call, matching
+# every other cheap-heuristic-first pattern in this stage (soft-404
+# detection, negative-signal filtering). Checked against the URL and the
+# first 5000 chars of crawled text, which is where a real vendor states
+# its API's shape (in a title, an intro paragraph, or a getting-started
+# code sample) if it states it at all. UNKNOWN (neither list matches) is
+# the deliberately conservative default -- it changes nothing about how
+# completeness gaps are read, unlike a confirmed GRAPHQL classification
+# (gate.py suppresses REST-specific gaps only for a confirmed GRAPHQL,
+# never for UNKNOWN).
+_GRAPHQL_MARKERS = ("/graphql", "graphql api", "graphql endpoint", "graphql schema")
+_REST_MARKERS = ("rest api", "restful api", "/openapi", "swagger")
+_STYLE_TEXT_SAMPLE_LENGTH = 5000
+
+
+def _detect_api_style(docs_url: str, docs_text: str) -> ApiStyle:
+    haystack = f"{docs_url} {docs_text[:_STYLE_TEXT_SAMPLE_LENGTH]}".lower()
+    if any(marker in haystack for marker in _GRAPHQL_MARKERS):
+        return ApiStyle.GRAPHQL
+    if any(marker in haystack for marker in _REST_MARKERS):
+        return ApiStyle.REST
+    return ApiStyle.UNKNOWN
 
 
 async def _try_fetch_text(url: str, *, fetch: FetchProvider) -> str | None:
@@ -108,7 +138,13 @@ async def discover(
                 )
             )
             last_no_api_result = DiscoveryResult(
-                reason_code=None, docs_url=docs_url, docs_text=docs_text, extraction=extraction
+                reason_code=None,
+                docs_url=docs_url,
+                docs_text=docs_text,
+                extraction=extraction,
+                source_tier=classify_source_tier(docs_url),
+                source_tier_reason=describe_tier_match(docs_url),
+                api_style=_detect_api_style(docs_url, docs_text),
             )
             continue
 
@@ -127,7 +163,13 @@ async def discover(
             )
         )
         return DiscoveryResult(
-            reason_code=reason_code, docs_url=docs_url, docs_text=docs_text, extraction=extraction
+            reason_code=reason_code,
+            docs_url=docs_url,
+            docs_text=docs_text,
+            extraction=extraction,
+            source_tier=classify_source_tier(docs_url),
+            source_tier_reason=describe_tier_match(docs_url),
+            api_style=_detect_api_style(docs_url, docs_text),
         )
 
     if last_no_api_result is not None:

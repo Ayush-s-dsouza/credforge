@@ -31,6 +31,7 @@ Flow:
    confidence before the final threshold check.
 """
 
+import asyncio
 import re
 from difflib import SequenceMatcher
 from urllib.parse import urlsplit
@@ -295,39 +296,69 @@ async def _collect_docs_candidate_urls(
     return urls
 
 
+# Bounded, not unbounded: every candidate in this list targets the same
+# app's registrable domain (search hits filtered to it, plus conventional
+# same-domain guesses), so the shared per-domain TokenBucket
+# (net/rate_limiter.py, keyed by registrable domain) still serializes most
+# of these regardless of how many run "concurrently" -- this cap exists to
+# avoid firing an unbounded burst of coroutines at once, not because it
+# unlocks true parallel network I/O for the common single-domain case. See
+# DECISIONS.md D-056 for the measured effect, which is real but smaller
+# than the number of candidates would suggest.
+_MAX_CONCURRENT_DOCS_PROBES = 5
+
+
+async def _verify_one_candidate(url: str, *, fetch: FetchProvider) -> tuple[str, str] | None:
+    try:
+        fetched = await fetch.fetch(url, method="GET")
+    except FetchException:
+        return None
+    if not (200 <= fetched.status_code < 300) or not fetched.text:
+        return None
+    if not _looks_like_api_docs(fetched.text):
+        return None
+
+    # D-054: describe the tier of `fetched.final_url` -- the URL actually
+    # returned and used downstream -- never the pre-redirect `url` a
+    # conventional guess started from. A real, live case: the guess
+    # "https://developers.linear.app" (a HIGH-tier subdomain) redirects to
+    # "https://linear.app/developers" (a HIGH-tier *path*, once D-054 also
+    # fixed the path/subdomain asymmetry -- but LOW under the old rule).
+    # Computing the reason on `url` and storing it against `final_url`
+    # would silently describe a URL that isn't the one anything downstream
+    # actually reads.
+    tier_desc = describe_tier_match(fetched.final_url)
+    marker_hits = [p.pattern for p in _API_MARKER_PATTERNS if p.search(fetched.text)]
+    reason = f"{tier_desc}; matched content markers: {', '.join(marker_hits[:4])}"
+    return (fetched.final_url, reason)
+
+
 async def _rank_and_verify_docs_candidates(
     candidate_urls: list[str], *, fetch: FetchProvider
 ) -> list[tuple[str, str]]:
     """Filters out negative-signal URLs, ranks the rest by three-tier
     source authority (D-049: official reference > general docs/guide >
-    everything else -- blogs, tutorials, forums), then fetches each in
-    ranked order and keeps only the ones whose *content* actually looks
-    like API documentation. A stable sort means within a tier, candidates
-    keep whatever relative order they arrived in (search rank, then
-    conventional guesses). Returns (url, reason) pairs, best first --
+    everything else -- blogs, tutorials, forums), then fetches every
+    ranked candidate (bounded concurrency, D-056) and keeps only the ones
+    whose *content* actually looks like API documentation. A stable sort
+    means within a tier, candidates keep whatever relative order they
+    arrived in (search rank, then conventional guesses); `asyncio.gather`
+    preserves that same order in its results regardless of which fetch
+    actually completes first. Returns (url, reason) pairs, best first --
     `reason` names the specific tier and matched signal, for
     evidence/auditability.
     """
     filtered = [u for u in candidate_urls if not _is_negative_docs_signal(u)]
     filtered.sort(key=tier_sort_key)
 
-    verified: list[tuple[str, str]] = []
-    for url in filtered:
-        try:
-            fetched = await fetch.fetch(url, method="GET")
-        except FetchException:
-            continue
-        if not (200 <= fetched.status_code < 300) or not fetched.text:
-            continue
-        if not _looks_like_api_docs(fetched.text):
-            continue
+    semaphore = asyncio.Semaphore(_MAX_CONCURRENT_DOCS_PROBES)
 
-        tier_desc = describe_tier_match(url)
-        marker_hits = [p.pattern for p in _API_MARKER_PATTERNS if p.search(fetched.text)]
-        reason = f"{tier_desc}; matched content markers: {', '.join(marker_hits[:4])}"
-        verified.append((fetched.final_url, reason))
+    async def _bounded(url: str) -> tuple[str, str] | None:
+        async with semaphore:
+            return await _verify_one_candidate(url, fetch=fetch)
 
-    return verified
+    results = await asyncio.gather(*(_bounded(url) for url in filtered))
+    return [r for r in results if r is not None]
 
 
 async def _discover_docs_candidates(

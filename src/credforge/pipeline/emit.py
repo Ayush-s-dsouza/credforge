@@ -93,6 +93,7 @@ def _build_from_gate(state: AppPipelineState, *, credforge_version: str) -> Hand
             redirect_uris_required=state.classify.redirect_uris_required if state.classify else False,
             source_tier=state.classify.source_tier if state.classify else None,
             classify_confidence=state.classify.confidence if state.classify else None,
+            api_style=state.discovery.api_style if state.discovery else None,
         )
 
     credential: CredentialInfo | None = None
@@ -132,18 +133,27 @@ def _build_from_gate(state: AppPipelineState, *, credforge_version: str) -> Hand
                 snippet=state.resolve.chosen.evidence_snippet,
             )
         )
-        # D-049: which docs URL was selected and why -- computed at
-        # candidate-ranking time (state.resolve.chosen.docs_url_reason
-        # already names the tier and matched signal), never previously
-        # surfaced in the artifact at all despite always being computed.
-        if state.resolve.chosen.docs_url and state.resolve.chosen.docs_url_reason:
-            evidence.append(
-                EvidenceItem(
-                    claim=f"docs source selected: {state.resolve.chosen.docs_url_reason}",
-                    source_url=state.resolve.chosen.docs_url,
-                    snippet=state.resolve.chosen.docs_url_reason,
-                )
+    # D-054: this evidence item now reads DISCOVER's source_tier_reason --
+    # computed once, from the same docs_url that ends up in `api.docs_url`
+    # and `api.source_tier` above -- instead of RESOLVE's
+    # `chosen.docs_url_reason`, which describes RESOLVE's own top-ranked
+    # candidate and can be a *different* URL (D-028's fallback-through-
+    # candidates) or even, for the same URL, a stale pre-redirect
+    # description (the real bug this replaced: a conventional subdomain
+    # guess like "developers.example.com" redirecting to
+    # "example.com/developers" before RESOLVE ever recorded its reason).
+    # The snippet is a real quote from the crawled page, not the reason
+    # text repeated -- the reason already IS the claim; the snippet's job
+    # is independent corroboration, matching every other evidence item's
+    # shape (see the "resolved identity to" item above).
+    if state.discovery and state.discovery.docs_url and state.discovery.source_tier_reason:
+        evidence.append(
+            EvidenceItem(
+                claim=f"docs source selected: {state.discovery.source_tier_reason}",
+                source_url=state.discovery.docs_url,
+                snippet=(state.discovery.docs_text or "")[:200].strip(),
             )
+        )
     evidence.extend(state.gate.evidence)
 
     return HandoffArtifact(

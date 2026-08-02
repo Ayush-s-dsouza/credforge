@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from credforge.enums import AuthScheme, ReasonCode, Status
+from credforge.enums import ApiStyle, AuthScheme, ReasonCode, Status
 from credforge.models.state import ClassifyResult, DiscoveryResult
 from credforge.pipeline.gate import gate
 from credforge.providers.fetch import FetchException, FetchError, FetchResult
@@ -299,6 +299,67 @@ async def test_clean_discovery_has_no_completeness_gaps() -> None:
     )
 
     assert result.completeness_gaps == []
+
+
+@pytest.mark.asyncio
+async def test_graphql_api_style_suppresses_only_the_rest_specific_completeness_gaps() -> None:
+    # D-055: Linear's real case -- a single GraphQL endpoint, cursor-based
+    # connections, no REST-style base_url-plus-many-paths shape.
+    # pagination_style_hint and validation_endpoint are REST-specific by
+    # current design (see gate.py's comment) and must be suppressed for a
+    # confirmed GraphQL API; base_url and rate_limit_notes are universal
+    # and must still be reported as real gaps when missing.
+    graphql_discovery = DiscoveryResult(
+        reason_code=ReasonCode.DISCOVERY_INCOMPLETE,
+        docs_url="https://linear.app/developers/graphql",
+        extraction=DiscoveryExtraction(
+            has_public_api=True,
+            base_url=None,
+            developer_portal_url="https://linear.app/settings/api",
+            rate_limit_notes=None,
+            pagination_style_hint=None,
+            validation_endpoint=None,
+        ),
+        api_style=ApiStyle.GRAPHQL,
+    )
+    fetch = FakeFetchProvider({"https://example.com/terms": _ok(LONG_TOS_TEXT)})
+    extractor = FakeExtractor(_clean_tos())
+
+    result = await gate(
+        "linear.app", discovery=graphql_discovery, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor
+    )
+
+    gap_fields = {g.field for g in result.completeness_gaps}
+    assert gap_fields == {"base_url", "rate_limit_notes"}
+    assert "pagination_style_hint" not in gap_fields
+    assert "validation_endpoint" not in gap_fields
+
+
+@pytest.mark.asyncio
+async def test_unknown_api_style_keeps_todays_rest_assuming_completeness_gaps() -> None:
+    # UNKNOWN must NOT suppress anything -- only a *confirmed* GraphQL
+    # classification changes behavior; an unconfirmed style keeps the
+    # existing, conservative REST-assuming gap list.
+    unknown_style_discovery = DiscoveryResult(
+        reason_code=ReasonCode.DISCOVERY_INCOMPLETE,
+        docs_url="https://docs.example.com",
+        extraction=DiscoveryExtraction(
+            has_public_api=True, base_url=None, rate_limit_notes=None,
+            pagination_style_hint=None, validation_endpoint=None,
+        ),
+        api_style=ApiStyle.UNKNOWN,
+    )
+    fetch = FakeFetchProvider({"https://example.com/terms": _ok(LONG_TOS_TEXT)})
+    extractor = FakeExtractor(_clean_tos())
+
+    result = await gate(
+        "example.com", discovery=unknown_style_discovery, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor
+    )
+
+    gap_fields = {g.field for g in result.completeness_gaps}
+    assert gap_fields == {
+        "base_url", "developer_portal_url", "rate_limit_notes", "pagination_style_hint", "validation_endpoint",
+    }
 
 
 @pytest.mark.asyncio

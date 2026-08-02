@@ -39,7 +39,7 @@ gap list instead -- a missing field in prose is not something a human
 needs to unblock; see DECISIONS.md D-029.
 """
 
-from ..enums import PipelineStage, ReasonCode, Status
+from ..enums import ApiStyle, PipelineStage, ReasonCode, Status
 from ..models.state import ClassifyResult, CompletenessGap, DiscoveryResult, EvidenceItem, GateResult
 from ..providers.fetch import FetchException, FetchProvider
 from ..providers.llm import DiscoveryExtraction, Extractor, TosGateExtraction
@@ -58,11 +58,27 @@ _EXPECTED_DISCOVERY_FIELDS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _completeness_gaps(extraction: DiscoveryExtraction) -> list[CompletenessGap]:
+# D-055: these two fields' *current design* assumes REST specifically --
+# pagination_style_hint is a prose hint the extractor looks for in
+# REST-shaped terms (query params, page numbers), and validation_endpoint
+# is consumed by VALIDATE as a bare "METHOD /path" resolved against
+# base_url with an always-GET request (pipeline/validate.py), which has
+# no meaning for a GraphQL API's single POST-with-a-query-body endpoint.
+# base_url, developer_portal_url, and rate_limit_notes stay universal --
+# a GraphQL vendor has exactly one of the first and (usually) prose about
+# the other two, same as a REST vendor; a missing one there is still a
+# real gap. Suppressing only kicks in for a *confirmed* GraphQL API, never
+# for UNKNOWN -- an unconfirmed style keeps today's REST-assuming
+# behavior rather than guessing. See DECISIONS.md D-055.
+_REST_ONLY_COMPLETENESS_FIELDS = frozenset({"pagination_style_hint", "validation_endpoint"})
+
+
+def _completeness_gaps(extraction: DiscoveryExtraction, *, api_style: ApiStyle | None) -> list[CompletenessGap]:
     return [
         CompletenessGap(field=field_name, reason=reason)
         for field_name, reason in _EXPECTED_DISCOVERY_FIELDS
         if getattr(extraction, field_name) is None
+        and not (api_style == ApiStyle.GRAPHQL and field_name in _REST_ONLY_COMPLETENESS_FIELDS)
     ]
 
 _TOS_URL_GUESSES = (
@@ -186,7 +202,7 @@ async def gate(
     # DISCOVERY_INCOMPLETE is deliberately not checked here -- see the
     # module docstring and D-029. It only ever shapes `completeness_gaps`,
     # never the status/reason_code decision.
-    completeness_gaps = _completeness_gaps(discovery.extraction)
+    completeness_gaps = _completeness_gaps(discovery.extraction, api_style=discovery.api_style)
     if completeness_gaps:
         explain.emit(
             ExplainEvent(

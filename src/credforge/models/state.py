@@ -14,7 +14,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ..enums import AuthScheme, CredentialType, ReasonCode, SourceTier, Status
+from ..enums import ApiStyle, AuthScheme, CredentialType, ReasonCode, SourceTier, Status
 from ..providers.browser import ProvisionStepResult
 from ..providers.llm import DiscoveryExtraction
 
@@ -45,6 +45,23 @@ class DiscoveryResult(BaseModel):
     docs_text: str | None = None  # carried forward so CLASSIFY never has to re-fetch the same page
     extraction: DiscoveryExtraction | None = None  # None only when reason_code == DISCOVERY_FAILED
     detail: str | None = None  # e.g. "tried 4 candidate docs URL(s), none yielded a usable API page"
+
+    # D-054: computed exactly once, here, from `docs_url` above -- the
+    # actual URL this stage settled on, not RESOLVE's original top-ranked
+    # candidate (which can differ, D-028, and which used to be described
+    # separately and inconsistently in the artifact's evidence). CLASSIFY
+    # and EMIT both read these two fields rather than recomputing the
+    # tier themselves, so the artifact's evidence array and its `api`
+    # block can never disagree about the tier of the same page again.
+    source_tier: SourceTier | None = None  # set whenever docs_url is set; None otherwise
+    source_tier_reason: str | None = None
+
+    # D-055: REST vs. GraphQL vs. unknown, detected from docs_url/docs_text
+    # once discovery settles on a real page. UNKNOWN is the conservative
+    # default -- it changes nothing downstream, unlike a confirmed
+    # GRAPHQL classification (which suppresses REST-specific completeness
+    # gaps, see gate.py).
+    api_style: ApiStyle | None = None  # set whenever docs_url is set; None otherwise
 
 
 class ClassifyResult(BaseModel):

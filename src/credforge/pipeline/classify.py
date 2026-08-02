@@ -11,18 +11,26 @@ low confidence rather than silently trusting a shaky guess.
 Source-authority weighting (D-049): the extractor's raw confidence
 measures how clearly the *page* could be read, not whether the *page* was
 authoritative -- a Trailhead tutorial can be extracted just as confidently
-as a real API reference. `source_tier` (computed here, from whichever
-docs_url DISCOVER actually used -- may not be RESOLVE's top pick, D-028)
-adjusts the raw number materially before it's compared against
-CONFIDENCE_THRESHOLD, and is recorded on the result so a HIGH-tier-derived
-0.6 and a LOW-tier-derived 0.6 are no longer indistinguishable.
+as a real API reference. `source_tier` adjusts the raw number materially
+before it's compared against CONFIDENCE_THRESHOLD, and is recorded on the
+result so a HIGH-tier-derived 0.6 and a LOW-tier-derived 0.6 are no
+longer indistinguishable.
+
+D-054: `source_tier` is a parameter here, not recomputed from `docs_url`.
+DISCOVER already computes it exactly once, from whichever docs_url it
+actually settled on (may not be RESOLVE's top pick, D-028) -- CLASSIFY
+used to call `classify_source_tier(docs_url)` a second time, and a real
+bug (a stale pre-redirect tier description surfacing in evidence)
+happened at a different call site but from the same root cause: more
+than one place in the pipeline computing "the" tier independently. Now
+there is exactly one computation site (discover.py); every consumer,
+including this one, reads its result.
 """
 
 from ..enums import AuthScheme, PipelineStage, ReasonCode, SourceTier
 from ..models.state import ClassifyResult
 from ..providers.llm import DiscoveryExtraction, Extractor
 from .explain import NULL_EXPLAIN, ExplainEvent, ExplainSink
-from .source_authority import classify_source_tier
 
 # Below this, a classification is treated as a guess, not a decision --
 # GATE routes it to HITL for human confirmation rather than auto-trusting
@@ -58,6 +66,7 @@ async def classify(
     docs_text: str,
     docs_url: str,
     discovery: DiscoveryExtraction,
+    source_tier: SourceTier | None,
     extractor: Extractor,
     explain: ExplainSink = NULL_EXPLAIN,
 ) -> ClassifyResult:
@@ -76,7 +85,11 @@ async def classify(
     )
     auth_scheme = _coerce_auth_scheme(extraction.auth_scheme)
 
-    source_tier = classify_source_tier(docs_url)
+    # DISCOVER only leaves this None when has_public_api was False (the
+    # branch above already returned), so it's always set on this path --
+    # asserted, not silently defaulted, so a future caller that forgets to
+    # pass it fails loudly instead of getting a wrong confidence number.
+    assert source_tier is not None, "source_tier must be set whenever DISCOVER reports has_public_api=True"
     adjusted_confidence = round(
         min(max(extraction.confidence + _TIER_CONFIDENCE_ADJUSTMENT[source_tier], 0.0), 1.0), 4
     )

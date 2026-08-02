@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from credforge.enums import ReasonCode
+from credforge.enums import ApiStyle, ReasonCode, SourceTier
 from credforge.pipeline.discover import discover
 from credforge.providers.fetch import FetchException, FetchError, FetchResult
 from credforge.providers.llm import DiscoveryExtraction
@@ -252,3 +252,87 @@ async def test_too_short_a_page_is_treated_as_unusable() -> None:
 
     assert result.reason_code is None
     assert result.docs_url == "https://developer.example.com"
+
+
+@pytest.mark.asyncio
+async def test_source_tier_is_computed_once_from_the_winning_docs_url() -> None:
+    # D-054: computed here, exactly once, from the URL this stage actually
+    # settled on -- CLASSIFY and EMIT both read this instead of
+    # recomputing it themselves (which is what let the tier in evidence
+    # and the tier in the api block disagree).
+    fetch = FakeFetchProvider({"https://docs.github.com/en/rest": _ok(LONG_TEXT)})
+    extractor = FakeExtractor(
+        {"https://docs.github.com/en/rest": DiscoveryExtraction(has_public_api=True, base_url="https://api.github.com")}
+    )
+
+    result = await discover(
+        "github.com",
+        docs_url_candidates=["https://docs.github.com/en/rest"],
+        fetch=fetch,
+        extractor=extractor,
+    )
+
+    assert result.source_tier == SourceTier.HIGH
+    assert "rest" in result.source_tier_reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_source_tier_still_recorded_when_no_public_api_was_found() -> None:
+    # A real page was read even though it turned out to have no public
+    # API -- the tier of *that* page is still worth recording (it's what
+    # the evidence array would describe if this becomes the final result).
+    fetch = FakeFetchProvider({"https://example.com": _ok(LONG_TEXT)})
+    extractor = FakeExtractor({"https://example.com": DiscoveryExtraction(has_public_api=False)})
+
+    result = await discover("example.com", docs_url_candidates=["https://example.com"], fetch=fetch, extractor=extractor)
+
+    assert result.extraction.has_public_api is False
+    assert result.source_tier == SourceTier.LOW
+
+
+@pytest.mark.asyncio
+async def test_api_style_detects_graphql_from_the_docs_url() -> None:
+    fetch = FakeFetchProvider({"https://linear.app/developers/graphql": _ok(LONG_TEXT)})
+    extractor = FakeExtractor(
+        {"https://linear.app/developers/graphql": DiscoveryExtraction(has_public_api=True, base_url="https://api.linear.app/graphql")}
+    )
+
+    result = await discover(
+        "linear.app",
+        docs_url_candidates=["https://linear.app/developers/graphql"],
+        fetch=fetch,
+        extractor=extractor,
+    )
+
+    assert result.api_style == ApiStyle.GRAPHQL
+
+
+@pytest.mark.asyncio
+async def test_api_style_detects_rest_from_page_text() -> None:
+    fetch = FakeFetchProvider({"https://docs.example.com": _ok("Our REST API lets you manage resources. " * 10)})
+    extractor = FakeExtractor(
+        {"https://docs.example.com": DiscoveryExtraction(has_public_api=True, base_url="https://api.example.com")}
+    )
+
+    result = await discover("example.com", docs_url_candidates=["https://docs.example.com"], fetch=fetch, extractor=extractor)
+
+    assert result.api_style == ApiStyle.REST
+
+
+@pytest.mark.asyncio
+async def test_api_style_is_unknown_with_no_clear_signal_either_way() -> None:
+    # LONG_TEXT (used by most other tests in this file) itself mentions
+    # "REST API", so this test deliberately uses neutral text with no
+    # REST or GraphQL marker at all -- UNKNOWN is the conservative
+    # default, not "assume REST."
+    neutral_text = "Welcome to our developer platform. Sign up to get started with the widgets service. " * 5
+    result = await discover(
+        "example.com",
+        docs_url_candidates=["https://docs.example.com"],
+        fetch=FakeFetchProvider({"https://docs.example.com": _ok(neutral_text)}),
+        extractor=FakeExtractor(
+            {"https://docs.example.com": DiscoveryExtraction(has_public_api=True, base_url="https://api.example.com")}
+        ),
+    )
+
+    assert result.api_style == ApiStyle.UNKNOWN

@@ -105,3 +105,18 @@ class SourceTier(StrEnum):
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
+
+
+class ApiStyle(StrEnum):
+    """The shape of the API DISCOVER actually crawled -- REST (many
+    resource paths off a base_url) vs. GraphQL (one endpoint, cursor-based
+    connections) vs. UNKNOWN (no clear positive signal for either).
+    UNKNOWN is the conservative default: it changes nothing about how
+    completeness gaps are read, unlike a confirmed GRAPHQL classification.
+    credforge's schema (base_url + path-shaped validation_endpoint,
+    REST-only VALIDATE) assumes REST by default; GraphQL is only partially
+    modelled. See DECISIONS.md D-055."""
+
+    REST = "rest"
+    GRAPHQL = "graphql"
+    UNKNOWN = "unknown"

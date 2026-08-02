@@ -46,7 +46,12 @@ def _resolved() -> ResolveResult:
     )
 
 
-def _discovered(has_public_api: bool = True) -> DiscoveryResult:
+def _discovered(
+    has_public_api: bool = True,
+    *,
+    source_tier: SourceTier | None = None,
+    source_tier_reason: str | None = None,
+) -> DiscoveryResult:
     return DiscoveryResult(
         reason_code=None,
         docs_url="https://docs.github.com/en/rest",
@@ -59,6 +64,8 @@ def _discovered(has_public_api: bool = True) -> DiscoveryResult:
             pagination_style_hint="link_header",
             validation_endpoint="GET /user",
         ),
+        source_tier=source_tier,
+        source_tier_reason=source_tier_reason,
     )
 
 
@@ -246,15 +253,20 @@ def test_unsupported_app_emits_with_no_credential_but_keeps_api_info_as_evidence
 
 
 def test_source_tier_and_docs_url_selection_reason_reach_the_artifact() -> None:
-    # D-049: both previously computed, neither previously surfaced --
-    # docs_url_reason was dropped entirely by EMIT, and source_tier didn't
-    # exist as a field at all. Both must now actually appear.
+    # D-049/D-054: docs_url_reason was dropped entirely by EMIT, and
+    # source_tier didn't exist as a field at all -- both must now appear.
+    # D-054 also moved *which* reason EMIT reads: DISCOVER's
+    # source_tier_reason (the URL actually used), not RESOLVE's
+    # chosen.docs_url_reason (which can describe a different, or a stale
+    # pre-redirect, URL) -- deliberately given a *different* reason string
+    # here so the test would fail if EMIT ever regressed to reading the
+    # wrong one.
     resolved = ResolveResult(
         resolved=True,
         chosen=ResolveCandidate(
             domain="github.com",
             docs_url="https://docs.github.com/en/rest",
-            docs_url_reason="HIGH-tier (path segment 'rest'); matched content markers: foo, bar",
+            docs_url_reason="stale RESOLVE-time reason -- must NOT appear in the artifact",
             confidence=0.98,
             evidence_url="https://github.com/",
             evidence_snippet="GitHub is where you belong.",
@@ -262,7 +274,10 @@ def test_source_tier_and_docs_url_selection_reason_reach_the_artifact() -> None:
     )
     state = _base_state(
         resolve=resolved,
-        discovery=_discovered(),
+        discovery=_discovered(
+            source_tier=SourceTier.HIGH,
+            source_tier_reason="HIGH-tier (path segment 'rest'); matched content markers: foo, bar",
+        ),
         classify=ClassifyResult(
             auth_scheme=AuthScheme.OAUTH2_AUTH_CODE, confidence=0.9, source_tier=SourceTier.HIGH,
         ),
@@ -278,6 +293,65 @@ def test_source_tier_and_docs_url_selection_reason_reach_the_artifact() -> None:
     assert len(docs_evidence) == 1
     assert "HIGH-tier" in docs_evidence[0].claim
     assert docs_evidence[0].source_url == "https://docs.github.com/en/rest"
+    assert "stale RESOLVE-time reason" not in docs_evidence[0].claim
+    # The snippet is a real page quote, distinct from the claim text --
+    # not the reason string repeated (the bug this replaced).
+    assert docs_evidence[0].snippet == "..."
+    assert docs_evidence[0].snippet != docs_evidence[0].claim
+
+
+@pytest.mark.parametrize(
+    "true_tier,stale_resolve_reason",
+    [
+        (SourceTier.HIGH, "LOW-tier (no official-reference or docs signal in URL shape)"),
+        (SourceTier.LOW, "HIGH-tier (path segment 'rest')"),
+        (SourceTier.MEDIUM, "HIGH-tier ('developer' subdomain)"),
+    ],
+)
+def test_evidence_tier_never_contradicts_the_api_block_tier(
+    true_tier: SourceTier, stale_resolve_reason: str
+) -> None:
+    # The exact bug a live Linear run surfaced: evidence said "HIGH-tier
+    # ('developers' subdomain)" while api.source_tier said "low" for the
+    # same run -- two contradictory claims about the same fact, not a
+    # silent failure. RESOLVE's own chosen.docs_url_reason is set here to
+    # a DELIBERATELY WRONG tier (simulating either D-028's fallback -- a
+    # different URL entirely -- or D-054's original pre-redirect-vs-
+    # final-URL bug) to prove EMIT no longer reads it for this claim at
+    # all, regardless of what it says.
+    resolved = ResolveResult(
+        resolved=True,
+        chosen=ResolveCandidate(
+            domain="github.com",
+            docs_url="https://docs.github.com/en/rest",
+            docs_url_reason=stale_resolve_reason,
+            confidence=0.98,
+            evidence_url="https://github.com/",
+            evidence_snippet="GitHub is where you belong.",
+        ),
+    )
+    state = _base_state(
+        resolve=resolved,
+        discovery=_discovered(
+            source_tier=true_tier,
+            source_tier_reason=f"{true_tier.value.upper()}-tier (the real, current tier)",
+        ),
+        classify=ClassifyResult(auth_scheme=AuthScheme.OAUTH2_AUTH_CODE, confidence=0.9, source_tier=true_tier),
+        gate=_gate_auto(),
+    )
+
+    artifact = build_artifact(state)
+
+    docs_evidence = next(e for e in artifact.evidence if "docs source selected" in e.claim)
+    # The tier named in the evidence claim and the tier in api.source_tier
+    # must be the exact same value -- never independently derived, never
+    # able to disagree.
+    assert true_tier.value.upper() in docs_evidence.claim
+    assert artifact.api.source_tier == true_tier
+    assert stale_resolve_reason not in docs_evidence.claim
+    for other_tier in SourceTier:
+        if other_tier != true_tier:
+            assert other_tier.value.upper() not in docs_evidence.claim
 
 
 def test_none_auth_scheme_emits_an_explicit_no_credential_required_credential_block() -> None:

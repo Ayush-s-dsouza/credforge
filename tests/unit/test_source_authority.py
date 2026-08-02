@@ -12,6 +12,23 @@ def test_high_tier_developer_subdomain() -> None:
     assert classify_source_tier("https://developers.example.com/") == SourceTier.HIGH
 
 
+def test_high_tier_developer_path_matches_the_developer_subdomain_symmetrically() -> None:
+    # D-054: a real live case (Linear's real docs live at
+    # "linear.app/developers", a path, not a subdomain) exposed an
+    # asymmetry -- "/docs/" was recognized as a HIGH/MEDIUM-adjacent path
+    # signal but "/developers" and "/developer" were not, even though the
+    # developer(s).* *subdomain* form already earned HIGH. Which shape a
+    # vendor happens to use isn't itself a signal of authority.
+    assert classify_source_tier("https://example.com/developers") == SourceTier.HIGH
+    assert classify_source_tier("https://example.com/developer") == SourceTier.HIGH
+    assert classify_source_tier("https://linear.app/developers") == SourceTier.HIGH
+
+
+def test_high_tier_api_docs_and_rest_api_paths() -> None:
+    assert classify_source_tier("https://example.com/api-docs/v1") == SourceTier.HIGH
+    assert classify_source_tier("https://example.com/rest-api/getting-started") == SourceTier.HIGH
+
+
 def test_medium_tier_docs_path_and_subdomain() -> None:
     assert classify_source_tier("https://example.com/docs/intro") == SourceTier.MEDIUM
     assert classify_source_tier("https://example.com/guide/setup") == SourceTier.MEDIUM

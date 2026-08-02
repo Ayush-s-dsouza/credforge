@@ -2,6 +2,7 @@ import pytest
 
 from credforge.enums import AuthScheme, ReasonCode, SourceTier
 from credforge.pipeline.classify import classify
+from credforge.pipeline.source_authority import classify_source_tier
 from credforge.providers.llm import ClassifyExtraction, DiscoveryExtraction
 
 
@@ -27,7 +28,8 @@ async def test_no_public_api_short_circuits_without_calling_the_extractor() -> N
     extractor = FakeExtractor(ClassifyExtraction(auth_scheme="api_key", confidence=0.9))
 
     result = await classify(
-        "example.com", docs_text="x", docs_url="https://example.com", discovery=discovery, extractor=extractor
+        "example.com", docs_text="x", docs_url="https://example.com", discovery=discovery,
+        source_tier=None, extractor=extractor,
     )
 
     assert result.auth_scheme == AuthScheme.NO_PUBLIC_API
@@ -43,7 +45,8 @@ async def test_classifies_every_auth_scheme_value_with_high_confidence(scheme: A
     extractor = FakeExtractor(ClassifyExtraction(auth_scheme=scheme.value, confidence=0.95))
 
     result = await classify(
-        "example.com", docs_text="x", docs_url="https://example.com", discovery=discovery, extractor=extractor
+        "example.com", docs_text="x", docs_url="https://example.com", discovery=discovery,
+        source_tier=classify_source_tier("https://example.com"), extractor=extractor,
     )
 
     assert result.auth_scheme == scheme
@@ -58,7 +61,8 @@ async def test_low_confidence_is_flagged_not_silently_trusted() -> None:
     extractor = FakeExtractor(ClassifyExtraction(auth_scheme="oauth2_auth_code", confidence=0.5))
 
     result = await classify(
-        "example.com", docs_text="x", docs_url="https://example.com", discovery=discovery, extractor=extractor
+        "example.com", docs_text="x", docs_url="https://example.com", discovery=discovery,
+        source_tier=classify_source_tier("https://example.com"), extractor=extractor,
     )
 
     assert result.auth_scheme == AuthScheme.OAUTH2_AUTH_CODE
@@ -74,7 +78,8 @@ async def test_unparseable_auth_scheme_string_is_flagged_not_crashed() -> None:
     extractor = FakeExtractor(ClassifyExtraction(auth_scheme="totally_not_a_real_scheme", confidence=0.95))
 
     result = await classify(
-        "example.com", docs_text="x", docs_url="https://example.com", discovery=discovery, extractor=extractor
+        "example.com", docs_text="x", docs_url="https://example.com", discovery=discovery,
+        source_tier=classify_source_tier("https://example.com"), extractor=extractor,
     )
 
     assert result.auth_scheme is None
@@ -88,7 +93,7 @@ async def test_source_tier_is_recorded_on_the_result() -> None:
 
     result = await classify(
         "example.com", docs_text="x", docs_url="https://developer.example.com/api/reference",
-        discovery=discovery, extractor=extractor,
+        discovery=discovery, source_tier=SourceTier.HIGH, extractor=extractor,
     )
 
     assert result.source_tier == SourceTier.HIGH
@@ -104,15 +109,18 @@ async def test_the_same_raw_confidence_is_distinguishable_by_source_tier() -> No
 
     high = await classify(
         "example.com", docs_text="x", docs_url="https://example.com/api/reference",
-        discovery=discovery, extractor=FakeExtractor(ClassifyExtraction(auth_scheme="api_key", confidence=0.6)),
+        discovery=discovery, source_tier=classify_source_tier("https://example.com/api/reference"),
+        extractor=FakeExtractor(ClassifyExtraction(auth_scheme="api_key", confidence=0.6)),
     )
     medium = await classify(
         "example.com", docs_text="x", docs_url="https://docs.example.com/getting-started",
-        discovery=discovery, extractor=FakeExtractor(ClassifyExtraction(auth_scheme="api_key", confidence=0.6)),
+        discovery=discovery, source_tier=classify_source_tier("https://docs.example.com/getting-started"),
+        extractor=FakeExtractor(ClassifyExtraction(auth_scheme="api_key", confidence=0.6)),
     )
     low = await classify(
         "example.com", docs_text="x", docs_url="https://trailhead.example.com/some-tutorial",
-        discovery=discovery, extractor=FakeExtractor(ClassifyExtraction(auth_scheme="api_key", confidence=0.6)),
+        discovery=discovery, source_tier=classify_source_tier("https://trailhead.example.com/some-tutorial"),
+        extractor=FakeExtractor(ClassifyExtraction(auth_scheme="api_key", confidence=0.6)),
     )
 
     assert high.source_tier == SourceTier.HIGH
@@ -137,7 +145,8 @@ async def test_low_tier_penalty_is_capped_at_zero_not_negative() -> None:
 
     result = await classify(
         "example.com", docs_text="x", docs_url="https://forum.example.com/thread",
-        discovery=discovery, extractor=extractor,
+        discovery=discovery, source_tier=classify_source_tier("https://forum.example.com/thread"),
+        extractor=extractor,
     )
 
     assert result.confidence == 0.0
@@ -157,7 +166,8 @@ async def test_scopes_and_redirect_uri_flag_are_passed_through() -> None:
     )
 
     result = await classify(
-        "example.com", docs_text="x", docs_url="https://example.com", discovery=discovery, extractor=extractor
+        "example.com", docs_text="x", docs_url="https://example.com", discovery=discovery,
+        source_tier=classify_source_tier("https://example.com"), extractor=extractor,
     )
 
     assert result.redirect_uris_required is True

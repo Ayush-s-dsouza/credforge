@@ -108,6 +108,7 @@ async def run_app(
             docs_text=state.discovery.docs_text,
             docs_url=state.discovery.docs_url,
             discovery=state.discovery.extraction,
+            source_tier=state.discovery.source_tier,
             extractor=providers.extractor,
             explain=explain,
         )
