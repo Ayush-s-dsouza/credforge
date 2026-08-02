@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from credforge import __version__ as credforge_version  # noqa: E402
 from credforge.config import Settings  # noqa: E402
 from credforge.pipeline.explain import ExplainEvent  # noqa: E402
 from credforge.pipeline.orchestrator import run_app  # noqa: E402
@@ -53,6 +54,15 @@ LIVE_RUN_CAP = int(os.environ.get("LIVE_RUN_CAP", "20"))
 # resolved by domain.
 _RECIPE_DISPLAY_NAMES = {"nasa.gov": "NASA API", "openweathermap.org": "OpenWeatherMap"}
 
+
+# Set at deploy time (`scripts/deploy_railway.sh`), not baked in by Railway
+# itself -- this service has no GitHub connection (repoTriggers is empty,
+# every deploy so far has been a manual `railway up`), so none of
+# Railway's own git-derived variables (which only populate for a
+# GitHub-triggered build) are ever set. Read fresh per request, not cached
+# at import time, so a variable set without a redeploy (rare, but
+# possible via `railway variable set`) is still reflected immediately.
+_PROCESS_STARTED_AT = time.time()
 
 settings = Settings()
 registry = AppendOnlyRegistry(settings.data_dir / "registry.jsonl")
@@ -178,6 +188,27 @@ def status() -> dict:
             for domain in sorted(LIVE_SIGNUP_RECIPES)
         ],
         "search_provider": "brave" if settings.brave_api_key else "ddg",
+    }
+
+
+@app.get("/api/version")
+def version() -> dict:
+    """What's actually running right now -- one request, no inference from
+    artifact contents. This exists because a stale Railway deploy was once
+    demoed as if it had a fix that was only in the local repo: the running
+    instance's commit and the git remote's HEAD had silently diverged, and
+    nothing short of reading pipeline output closely enough to notice a
+    missing field would have caught it. `commit_sha` is `"unknown"` if this
+    process was never told one -- e.g. a local `uvicorn` run, or a deploy
+    where the deploy script's variable-set step was skipped -- an honest
+    gap, not a guess at a value nobody actually confirmed."""
+    commit_sha = os.environ.get("GIT_COMMIT_SHA", "unknown")
+    return {
+        "commit_sha": commit_sha,
+        "commit_sha_short": commit_sha[:7] if commit_sha != "unknown" else "unknown",
+        "credforge_version": credforge_version,
+        "process_started_at": _PROCESS_STARTED_AT,
+        "process_uptime_seconds": round(time.time() - _PROCESS_STARTED_AT, 1),
     }
 
 
