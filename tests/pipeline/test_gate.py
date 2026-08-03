@@ -736,6 +736,163 @@ async def test_alpha_vantage_shape_reaches_auto_when_a_tos_page_is_findable() ->
     assert result.reason_code == ReasonCode.ELIGIBLE_AUTO
 
 
+# --- D-059: real anchor-link discovery for the ToS page, guess list as fallback
+
+_FOOTER_WITH_TOS_LINK = """
+<html><body>
+<nav>Home Docs Pricing</nav>
+<main>API Documentation content goes here, more than two hundred characters
+long so it clears the minimum usable text length check that guards every
+page this parser is asked to look at, including this synthetic one here.</main>
+<footer>
+<a href="/about">About</a>
+<a href="/terms_of_service/">Terms of Service</a>
+<a href="mailto:support@example.com">Contact</a>
+<a href="#top">Back to top</a>
+</footer>
+</body></html>
+"""
+
+
+def test_extract_tos_candidate_links_matches_href_and_text_keywords_and_resolves_relative_urls() -> None:
+    from credforge.pipeline.gate import _extract_tos_candidate_links
+
+    html = """
+    <a href="/legal/privacy">Privacy</a>
+    <a href="/help">Read our Terms and Conditions</a>
+    <a href="https://other.example.com/tos">TOS</a>
+    <a href="mailto:legal@example.com">Email legal</a>
+    <a href="javascript:void(0)">Cookie settings</a>
+    <a href="#section-2">Jump to section 2</a>
+    """
+    links = _extract_tos_candidate_links(html, base_url="https://example.com/docs")
+
+    assert "https://example.com/legal/privacy" in links
+    assert "https://example.com/help" in links  # matched on visible text, not href
+    assert "https://other.example.com/tos" in links  # absolute href passed through as-is
+    assert not any("mailto:" in link for link in links)
+    assert not any(link.startswith(("javascript:", "https://example.com/docs#")) for link in links)
+
+
+def test_extract_tos_candidate_links_returns_empty_on_malformed_html_not_a_crash() -> None:
+    from credforge.pipeline.gate import _extract_tos_candidate_links
+
+    # Deliberately broken markup -- must degrade to "no candidates found",
+    # never raise, so the caller falls back to the guess list.
+    links = _extract_tos_candidate_links("<a href='/terms'><a><a>>>><div", base_url="https://example.com")
+    assert isinstance(links, list)
+
+
+@pytest.mark.asyncio
+async def test_tos_found_via_docs_page_link_discovery_at_an_unconventional_url() -> None:
+    # The exact real case: Alpha Vantage's real ToS lives at
+    # /terms_of_service/, discoverable from a footer link on the docs
+    # page DISCOVER already crawled -- no guess in _TOS_URL_GUESSES needs
+    # to have anticipated this specific path.
+    discovery = DiscoveryResult(
+        reason_code=None, docs_url="https://www.alphavantage.co/documentation/",
+        docs_text=_FOOTER_WITH_TOS_LINK,
+        extraction=DiscoveryExtraction(has_public_api=True),
+    )
+    tos_text = "These are the real terms of service for this vendor. " * 5
+    fetch = FakeFetchProvider(
+        {
+            "https://alphavantage.co": FetchResult(
+                url="https://alphavantage.co", final_url="https://alphavantage.co", status_code=200,
+                content_type="text/html", text="<html><body>homepage, no footer links here</body></html>",
+                fetched_at=datetime.now(timezone.utc),
+            ),
+            "https://www.alphavantage.co/terms_of_service/": FetchResult(
+                url="x", final_url="x", status_code=200, content_type="text/html",
+                text=tos_text, fetched_at=datetime.now(timezone.utc),
+            ),
+        }
+    )
+    extractor = FakeExtractor(_clean_tos())
+
+    result = await gate("alphavantage.co", discovery=discovery, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor)
+
+    assert result.status == Status.AUTO
+    assert result.evidence[0].source_url == "https://www.alphavantage.co/terms_of_service/"
+
+
+@pytest.mark.asyncio
+async def test_tos_found_via_homepage_link_discovery_when_docs_page_has_no_footer() -> None:
+    # The docs page itself has no footer/ToS link at all -- the homepage
+    # is the other real source scanned, and must be enough on its own.
+    discovery = DiscoveryResult(
+        reason_code=None, docs_url="https://docs.example.com",
+        docs_text="Plain API docs with no links of any kind, just prose about endpoints. " * 5,
+        extraction=DiscoveryExtraction(has_public_api=True),
+    )
+    tos_text = "These are the terms of service found via the homepage footer. " * 5
+    fetch = FakeFetchProvider(
+        {
+            "https://example.com": FetchResult(
+                url="https://example.com", final_url="https://example.com", status_code=200,
+                content_type="text/html", text=_FOOTER_WITH_TOS_LINK, fetched_at=datetime.now(timezone.utc),
+            ),
+            "https://example.com/terms_of_service/": FetchResult(
+                url="x", final_url="x", status_code=200, content_type="text/html",
+                text=tos_text, fetched_at=datetime.now(timezone.utc),
+            ),
+        }
+    )
+    extractor = FakeExtractor(_clean_tos())
+
+    result = await gate("example.com", discovery=discovery, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor)
+
+    assert result.status == Status.AUTO
+    assert result.evidence[0].source_url == "https://example.com/terms_of_service/"
+
+
+@pytest.mark.asyncio
+async def test_link_discovery_finds_nothing_falls_back_to_the_guess_list() -> None:
+    # Neither the docs page nor the homepage has any ToS-shaped link at
+    # all -- link discovery must degrade cleanly to the pre-D-059 guess
+    # list, not fail outright.
+    discovery = DiscoveryResult(
+        reason_code=None, docs_url="https://docs.example.com",
+        docs_text="Plain API docs, no links, just prose about endpoints and authentication. " * 5,
+        extraction=DiscoveryExtraction(has_public_api=True),
+    )
+    fetch = FakeFetchProvider(
+        {
+            "https://example.com": FetchResult(
+                url="https://example.com", final_url="https://example.com", status_code=200,
+                content_type="text/html", text="<html><body>No footer links at all here.</body></html>",
+                fetched_at=datetime.now(timezone.utc),
+            ),
+            "https://example.com/terms": _ok(LONG_TOS_TEXT),
+        }
+    )
+    extractor = FakeExtractor(_clean_tos())
+
+    result = await gate("example.com", discovery=discovery, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor)
+
+    assert result.status == Status.AUTO
+    assert result.evidence[0].source_url == "https://example.com/terms"
+
+
+@pytest.mark.asyncio
+async def test_underscore_guess_variants_are_tried_when_link_discovery_finds_nothing() -> None:
+    # The narrow fix: even with zero link-discovery candidates, the
+    # expanded guess list (including the new underscore variants) still
+    # finds a real ToS page a purely-hyphenated guess list would miss.
+    discovery = DiscoveryResult(
+        reason_code=None, docs_url="https://docs.example.com",
+        docs_text="Plain API docs, no links at all. " * 10,
+        extraction=DiscoveryExtraction(has_public_api=True),
+    )
+    fetch = FakeFetchProvider({"https://example.com/terms_of_service/": _ok(LONG_TOS_TEXT)})
+    extractor = FakeExtractor(_clean_tos())
+
+    result = await gate("example.com", discovery=discovery, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor)
+
+    assert result.status == Status.AUTO
+    assert result.evidence[0].source_url == "https://example.com/terms_of_service/"
+
+
 @pytest.mark.asyncio
 async def test_completeness_gaps_are_still_carried_on_a_hitl_result() -> None:
     incomplete_discovery = DiscoveryResult(

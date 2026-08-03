@@ -3048,3 +3048,91 @@ the real shape (no findable ToS page) honestly asserts
 `TOS_UNVERIFIABLE`, not `AUTO`; a second, otherwise-identical case with a
 findable clean ToS page asserts the flag-suppression mechanism itself
 does reach `AUTO` when nothing else is in the way. 242/242 tests pass.
+
+### D-059: Real anchor-link discovery for the ToS page, not a bigger guess list -- Alpha Vantage's real ToS uses underscores, which none of seven hyphenated guesses ever matched
+
+**The actual reason `TOS_UNVERIFIABLE` fired for Alpha Vantage after
+D-058:** not a missing keyword, a missing URL. Its real ToS is at
+`alphavantage.co/terms_of_service/` -- underscore-separated -- and every
+one of `_TOS_URL_GUESSES`'s seven entries was hyphenated or bare
+(`/terms-of-service`, `/terms`, `/tos`, ...). GATE never fetched the page
+that would have told it anything at all.
+
+**Two fixes, one narrow and one structural, both requested and both
+done:**
+
+1. **Narrow:** four underscore variants added to `_TOS_URL_GUESSES` --
+   `/terms_of_service/`, `/terms_and_conditions/`, `/terms_of_use/`,
+   `/privacy_policy/`. Fixes this one vendor. Does not fix the next one
+   that guesses a different shape again.
+2. **Structural:** `_find_tos_page()` now tries real anchor-link
+   discovery *first* -- `_extract_tos_candidate_links()` parses real
+   page HTML (stdlib `html.parser.HTMLParser`, no new dependency) for
+   every `<a>` whose `href` or visible text contains `terms`, `tos`,
+   `legal`, `conditions`, or `agreement`, resolves each to an absolute
+   URL, and GATE fetches those candidates before ever touching the guess
+   list. Two real sources are scanned: the docs page DISCOVER already
+   crawled (`discovery.docs_text`, zero extra fetch cost, now passed
+   into `_find_tos_page`) and the resolved homepage (one new fetch --
+   the other place a footer commonly lives, and the only one for a
+   vendor whose docs page itself has none). This is literally how a
+   human finds a ToS page: they look at the footer, they don't guess
+   URL shapes. The guess list (now with the underscore variants) is kept
+   as a fallback, not replaced -- link discovery finds nothing on a page
+   with no footer at all, and the fallback is what still finds Alpha
+   Vantage's real page even without any link discovery, per fix #1.
+
+**Why the narrow fix was still worth keeping, not just superseded by the
+general one:** the general fix depends on the docs page or homepage
+actually containing a real footer link -- a vendor whose only readable
+page has no navigational footer at all (a bare API-endpoint domain, a
+single-page app that renders its footer client-side and DISCOVER's plain
+HTTP fetch never sees) still falls through to the guess list, and a
+guess list that only covers hyphenated shapes would still miss an
+underscore-shaped vendor in that case. Keeping both means the miss this
+session actually found can never recur even in link-discovery's own
+blind spot.
+
+**Rejected: a full HTML/CSS selector library (e.g., adding
+BeautifulSoup) instead of stdlib `HTMLParser`.** The task is bounded and
+well-defined -- collect `(href, text)` pairs for every `<a>` tag, nothing
+more -- and this project has never added a dependency where the stdlib
+already does the job (see `heuristic_extractor.py`'s own regex-based
+extraction, no parsing library at all). `HTMLParser` is stateful and a
+little more verbose to drive than a selector call, but it's zero new
+supply chain and zero new install step for a task this narrow.
+
+**Rejected: treating every candidate link as equally worth trying, in
+whatever order the HTML happened to list them, without any dedup.**
+Implemented dedup (`seen` set) because the same URL commonly appears
+twice on a real page (a footer link and a signup-flow "by continuing you
+agree to our Terms" link, for instance) -- fetching it twice would waste
+a real request for no benefit. Order itself is left as document order
+(footer links, which is where the real candidates usually live, typically
+come later in the page) -- not re-sorted by any authority signal, unlike
+D-049's docs-candidate tier ranking; a ToS page is a ToS page, there's no
+"more official" version of it to prefer among real candidates.
+
+**Rejected: fetching every discovered candidate concurrently** (the
+D-056 pattern). Real ToS pages are usually one or two candidates per
+vendor, not RESOLVE's much longer per-app docs-candidate list D-056 was
+written for -- the concurrency-management complexity isn't earning its
+keep at this scale, and sequential-with-early-exit (stop at the first
+usable page) is both simpler and, for the common one-candidate case,
+identical in real latency.
+
+**Verified:** `tests/pipeline/test_gate.py` -- direct unit coverage of
+`_extract_tos_candidate_links` (matches on href, matches on visible text,
+resolves a root-relative href correctly via `urljoin`, excludes
+`mailto:`/`javascript:`/pure-anchor links, degrades to an empty list on
+malformed HTML rather than raising); GATE finds Alpha Vantage's real
+`/terms_of_service/` shape via docs-page link discovery; a separate case
+proves homepage-only discovery works when the docs page itself has no
+footer; link discovery finding nothing correctly falls back to the guess
+list unchanged; the new underscore guesses are exercised directly when
+link discovery has nothing to offer at all. Every pre-D-059 `test_gate.py`
+test (47 in the file, 248 project-wide) still passes unchanged -- none of
+the existing fixtures populate a homepage response, so they all correctly
+fall through link discovery (finds nothing) straight to the same guess-
+list behavior they tested before this change, proving the fallback is
+truly backward compatible, not just theoretically so.

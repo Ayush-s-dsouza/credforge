@@ -12,12 +12,17 @@ different kind of fact than the ToS/payment/phone checks -- those are all
 about whether *developer-portal signup* is gated, which presupposes a
 developer portal exists at all. See DECISIONS.md D-020.
 
-GATE fetches and checks the actual ToS/developer-agreement text itself
-(a small set of common-URL guesses, same pattern as DISCOVER's
-docs-subdomain guessing) -- it never assumes automation is permitted just
-because no evidence of prohibition turned up elsewhere. If no ToS page can
-be found at all, that is treated as insufficient evidence to clear the app
-for AUTO, not as a pass. See DECISIONS.md D-021.
+GATE fetches and checks the actual ToS/developer-agreement text itself --
+found the way a human finds it, by real anchor-link discovery on the
+already-crawled docs page and the resolved homepage (looking for a
+terms/tos/legal/conditions/agreement link, i.e. the footer), falling back
+to a small set of common-URL guesses only when link discovery finds
+nothing (D-059; a fixed guess list alone missed Alpha Vantage's real ToS
+at the unconventional, underscore-separated `/terms_of_service/`). It
+never assumes automation is permitted just because no evidence of
+prohibition turned up elsewhere. If no ToS page can be found at all, that
+is treated as insufficient evidence to clear the app for AUTO, not as a
+pass. See DECISIONS.md D-021.
 
 GATE collects vendor-policy signals from every source it actually has,
 not just the dedicated ToS page: DISCOVER's already-crawled docs page
@@ -58,6 +63,9 @@ language present is treated as a structural false positive even if no
 keyword list happens to recognize the exact phrasing, logged loudly, not
 silently. See DECISIONS.md D-057/D-058.
 """
+
+from html.parser import HTMLParser
+from urllib.parse import urljoin
 
 from ..enums import ApiStyle, PipelineStage, ReasonCode, Status
 from ..models.state import ClassifyResult, CompletenessGap, DiscoveryResult, EvidenceItem, GateResult
@@ -245,6 +253,16 @@ _TOS_URL_GUESSES = (
     "/terms",
     "/tos",
     "/legal/terms",
+    # D-059: underscore variants -- Alpha Vantage's real ToS is at
+    # /terms_of_service/, which none of the hyphenated/short guesses
+    # above ever matched. This is exactly the kind of miss link discovery
+    # (below) exists to stop needing to anticipate one vendor at a time;
+    # these four stay as the last-resort fallback for when link discovery
+    # itself finds nothing.
+    "/terms_of_service/",
+    "/terms_and_conditions/",
+    "/terms_of_use/",
+    "/privacy_policy/",
 )
 _MIN_USABLE_TEXT_LENGTH = 200
 
@@ -272,20 +290,125 @@ def _looks_like_a_real_page(text: str) -> bool:
     return not any(marker in lower for marker in _SOFT_404_MARKERS)
 
 
-async def _find_tos_page(domain: str, *, fetch: FetchProvider) -> tuple[str, str] | None:
-    for path in _TOS_URL_GUESSES:
-        url = f"https://{domain}{path}"
-        try:
-            result = await fetch.fetch(url, method="GET")
-        except FetchException:
+# D-059: real anchor-link discovery -- how a human actually finds a ToS
+# page: they look at the footer. Guessing a fixed list of paths cannot
+# generalize across real vendors (Alpha Vantage's real ToS lives at
+# /terms_of_service/, which none of the seven pre-D-059 guesses, all
+# hyphenated or bare, ever matched); link discovery scans real page
+# content for real links instead of enumerating URL shapes in advance.
+# The guess list is kept as a fallback, not replaced -- link discovery
+# finds nothing on a page with no footer at all (a bare API endpoint
+# domain with no marketing site, for instance).
+_TOS_LINK_KEYWORDS = ("terms", "tos", "legal", "conditions", "agreement")
+
+
+class _AnchorLinkParser(HTMLParser):
+    """Collects every <a href> on the page paired with its visible text --
+    stdlib only, no new dependency for a real, bounded parsing task."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[tuple[str, str]] = []
+        self._current_href: str | None = None
+        self._current_text_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "a":
+            self._current_href = dict(attrs).get("href")
+            self._current_text_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._current_href is not None:
+            self._current_text_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._current_href is not None:
+            self.links.append((self._current_href, "".join(self._current_text_parts)))
+            self._current_href = None
+            self._current_text_parts = []
+
+
+def _extract_tos_candidate_links(html_text: str, *, base_url: str) -> list[str]:
+    """Absolute URLs for every <a> whose href OR visible text contains a
+    ToS/legal keyword, in document order, deduplicated. Never raises --
+    malformed HTML degrades to an empty list (the caller falls back to
+    the guess list), not a crash. See DECISIONS.md D-059."""
+    parser = _AnchorLinkParser()
+    try:
+        parser.feed(html_text)
+    except Exception:
+        return []
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for href, text in parser.links:
+        if not href or href.lower().startswith(("#", "mailto:", "javascript:", "tel:")):
             continue
-        if (
-            200 <= result.status_code < 300
-            and result.text
-            and len(result.text) >= _MIN_USABLE_TEXT_LENGTH
-            and _looks_like_a_real_page(result.text)
-        ):
-            return url, result.text
+        haystack = f"{href} {text}".lower()
+        if not any(keyword in haystack for keyword in _TOS_LINK_KEYWORDS):
+            continue
+        absolute = urljoin(base_url, href)
+        if absolute not in seen:
+            seen.add(absolute)
+            candidates.append(absolute)
+    return candidates
+
+
+async def _fetch_usable_page(url: str, *, fetch: FetchProvider) -> tuple[str, str] | None:
+    try:
+        result = await fetch.fetch(url, method="GET")
+    except FetchException:
+        return None
+    if (
+        200 <= result.status_code < 300
+        and result.text
+        and len(result.text) >= _MIN_USABLE_TEXT_LENGTH
+        and _looks_like_a_real_page(result.text)
+    ):
+        return url, result.text  # the requested URL, not result.final_url -- matches pre-D-059 behavior
+    return None
+
+
+async def _find_tos_page(
+    domain: str, *, fetch: FetchProvider, docs_html: str | None = None, docs_url: str | None = None
+) -> tuple[str, str] | None:
+    # Real link discovery first, from every real page already in hand or
+    # cheap to fetch: the docs page DISCOVER already crawled (zero extra
+    # fetch cost) and the resolved homepage (one extra fetch -- the other
+    # place a footer commonly lives, and often the only one for a vendor
+    # whose docs page has no footer at all).
+    candidate_urls: list[str] = []
+    seen_candidates: set[str] = set()
+
+    def _add_candidates(html_text: str, *, base_url: str) -> None:
+        for url in _extract_tos_candidate_links(html_text, base_url=base_url):
+            if url not in seen_candidates:
+                seen_candidates.add(url)
+                candidate_urls.append(url)
+
+    if docs_html and docs_url:
+        _add_candidates(docs_html, base_url=docs_url)
+
+    homepage_url = f"https://{domain}"
+    try:
+        homepage = await fetch.fetch(homepage_url, method="GET")
+    except FetchException:
+        homepage = None
+    if homepage is not None and 200 <= homepage.status_code < 300 and homepage.text:
+        _add_candidates(homepage.text, base_url=homepage.final_url or homepage_url)
+
+    for url in candidate_urls:
+        found = await _fetch_usable_page(url, fetch=fetch)
+        if found is not None:
+            return found
+
+    # Fallback: link discovery found no candidates, or none of them
+    # panned out (unreachable, too short, a soft 404) -- try the
+    # conventional guesses, same behavior as before D-059.
+    for path in _TOS_URL_GUESSES:
+        found = await _fetch_usable_page(f"https://{domain}{path}", fetch=fetch)
+        if found is not None:
+            return found
     return None
 
 
@@ -412,7 +535,9 @@ async def gate(
         )
         signal_sources.append(("developer docs", discovery.docs_url, docs_signals))
 
-    tos_found = await _find_tos_page(identity_key, fetch=fetch)
+    tos_found = await _find_tos_page(
+        identity_key, fetch=fetch, docs_html=discovery.docs_text, docs_url=discovery.docs_url
+    )
     if tos_found is not None:
         tos_url, tos_text = tos_found
         tos_signals = await extractor.extract_tos_gate_signals(tos_text=tos_text, tos_url=tos_url)
