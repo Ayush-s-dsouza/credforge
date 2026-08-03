@@ -3192,3 +3192,49 @@ against a real vendor for the first time. Reading a PDF ToS is real,
 plausible future work (a `pdf` optional extra and a text-extraction
 step at the fetch layer), explicitly not attempted here -- out of scope
 for "find the right URL," which is what was asked and what's now fixed.
+
+### D-060: PDF responses are extracted to text at the fetch layer -- the same size-capped bytes every content type already goes through
+
+**Decided:** `HttpxFetchProvider.fetch()` gains a third content-handling
+branch alongside "textual" and "everything else stays `text=None`":
+`application/pdf` responses are extracted via `pypdf` (`_extract_pdf_text`,
+`PdfReader` over the already-streamed, already-size-capped `body` bytes --
+no new fetch, no new size check, the exact same `_stream_capped` guard
+every other content type goes through). A genuine parse failure (a
+corrupted or non-PDF body under that content type) raises `FetchException`
+with a new, typed reason, `pdf_decode_error` -- added to
+`FetchErrorReason`'s `Literal`, mirroring `decode_error`'s existing
+treatment of a bad text codec exactly, not a new failure philosophy.
+`pypdf` is a real, base dependency (`pyproject.toml`), not gated behind an
+optional extra -- unlike `playwright`/`anthropic`, it has no heavy binary
+or network-SDK weight, and this is core fetch-layer behavior every stage
+already depends on unconditionally.
+
+**Found live, the direct continuation of D-059:** Alpha Vantage's real
+ToS -- now correctly located by D-059's link discovery -- is served as
+`Content-Type: application/pdf`. Before this fix, `_is_textual_content_type()`
+correctly (by original design) never decoded it, so `text` stayed `None`
+and GATE could never confirm anything about the one vendor this whole
+chain of fixes (D-057 through D-059) was working to unblock.
+
+**Rejected: gating this behind a new `pdf` optional extra**, matching
+`playwright`/`anthropic`'s pattern. Those are heavy (a browser binary
+download, a network SDK) and genuinely optional -- most of this
+project's default, offline-capable path never needs them. PDF handling
+at the fetch layer is neither: `pypdf` is a small, pure pip install, and
+"can this stage read the page it just fetched" is not a feature any
+caller opts into, it's baseline fetch-layer behavior every stage already
+assumes works for whatever content type a real vendor happens to serve.
+
+**Rejected: OCR or scanned-image PDF support.** `pypdf`'s `extract_text()`
+reads the PDF's real text layer; a scanned, image-only PDF has none and
+would still come back empty (not raise -- `page.extract_text() or ""`
+degrades gracefully per page). Out of scope; not the case found live.
+
+**Verified:** `tests/providers/test_httpx_fetch.py` -- a real, hand-built,
+valid minimal PDF (correct object offsets, computed programmatically, not
+guessed) round-trips through a real `pypdf` parse and the extracted text
+reaches `FetchResult.text`; the existing size cap still rejects an
+oversized PDF before any bytes are streamed, unchanged from D-030; a
+corrupted PDF body raises the new typed `pdf_decode_error`, not an
+unhandled `pypdf` exception. 253/253 tests pass.

@@ -19,6 +19,7 @@ FetchErrorReason = Literal[
     "rate_limited_wait_exceeded",
     "response_too_large",
     "decode_error",
+    "pdf_decode_error",
 ]
 
 

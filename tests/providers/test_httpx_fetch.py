@@ -15,6 +15,34 @@ def _provider(max_response_bytes: int | None = None) -> HttpxFetchProvider:
     return HttpxFetchProvider(rate_limiter=limiter, user_agent="credforge-test/0.1", **kwargs)
 
 
+def _minimal_pdf_with_text(text: str) -> bytes:
+    """A real, valid, minimal single-page PDF with one text run -- built by
+    hand (correct xref offsets computed here, not guessed) rather than
+    depending on a static binary fixture file. Verified against a real
+    pypdf parse before use in any test."""
+    stream = f"BT /F1 12 Tf 10 50 Td ({text}) Tj ET".encode()
+    objects = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> "
+        b"/MediaBox [0 0 200 100] /Contents 5 0 R >>\nendobj\n",
+        b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        b"5 0 obj\n<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream\nendobj\n",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for obj in objects:
+        offsets.append(len(out))
+        out.extend(obj)
+    xref_start = len(out)
+    xref = b"xref\n0 6\n0000000000 65535 f \n"
+    for off in offsets[1:]:
+        xref += f"{off:010d} 00000 n \n".encode()
+    out.extend(xref)
+    out.extend(b"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n" + str(xref_start).encode() + b"\n%%EOF")
+    return bytes(out)
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_successful_fetch_returns_result() -> None:
@@ -177,3 +205,64 @@ async def test_decode_error_is_wrapped_not_propagated(monkeypatch: pytest.Monkey
         await provider.fetch("https://example.com/bad-encoding")
 
     assert exc_info.value.error.reason == "decode_error"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pdf_response_is_extracted_to_text() -> None:
+    # D-060: found live -- Alpha Vantage's real ToS is served as
+    # application/pdf, and GATE could never confirm anything about it
+    # while a PDF response's `text` stayed None unconditionally.
+    pdf_bytes = _minimal_pdf_with_text("Hello ToS PDF World")
+    respx.get("https://example.com/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://example.com/terms.pdf").mock(
+        return_value=httpx.Response(200, content=pdf_bytes, headers={"content-type": "application/pdf"})
+    )
+
+    provider = _provider()
+    result = await provider.fetch("https://example.com/terms.pdf")
+
+    assert result.text is not None
+    assert "Hello ToS PDF World" in result.text
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pdf_still_goes_through_the_existing_size_cap() -> None:
+    # The size cap is not a PDF-specific guard -- it's the same
+    # _stream_capped path every content type already goes through. A
+    # server honest about a too-large PDF must still be rejected before
+    # any bytes are streamed or handed to pypdf, same as D-030.
+    respx.get("https://example.com/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://example.com/huge.pdf").mock(
+        return_value=httpx.Response(
+            200,
+            content=b"%PDF-1.4 not a real full pdf but content-length lies about size anyway",
+            headers={"content-length": "999999999", "content-type": "application/pdf"},
+        )
+    )
+
+    provider = _provider(max_response_bytes=5 * 1024 * 1024)
+    with pytest.raises(FetchException) as exc_info:
+        await provider.fetch("https://example.com/huge.pdf")
+
+    assert exc_info.value.error.reason == "response_too_large"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_corrupted_pdf_raises_a_typed_pdf_decode_error_not_unhandled() -> None:
+    # A real PDF-parsing failure (corrupted body, no real xref) must
+    # degrade to a typed FetchException, the same principle
+    # test_decode_error_is_wrapped_not_propagated already establishes for
+    # text decoding -- never an unhandled pypdf exception.
+    respx.get("https://example.com/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://example.com/corrupt.pdf").mock(
+        return_value=httpx.Response(200, content=b"%PDF-1.4\nthis is not a real pdf body", headers={"content-type": "application/pdf"})
+    )
+
+    provider = _provider()
+    with pytest.raises(FetchException) as exc_info:
+        await provider.fetch("https://example.com/corrupt.pdf")
+
+    assert exc_info.value.error.reason == "pdf_decode_error"

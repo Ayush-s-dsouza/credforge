@@ -16,6 +16,12 @@ Every response is streamed and size-capped (default 5 MB, `max_response_bytes`)
 rather than buffered and decoded in one shot -- found via a real crawl that
 hit a pathologically large third-party page and died with a MemoryError
 inside `response.text`. See DECISIONS.md D-030.
+
+A `application/pdf` response is extracted to text (`pypdf`), the same
+size-capped `body` bytes every other content type already goes through --
+found live, a real vendor's real ToS (Alpha Vantage) is served as a PDF,
+and GATE could never confirm anything about it while `text` stayed empty
+for every PDF response. See DECISIONS.md D-060.
 """
 
 import html
@@ -81,6 +87,16 @@ class HttpxFetchProvider:
             except (MemoryError, UnicodeDecodeError) as exc:
                 raise FetchException(
                     FetchError(url=url, reason="decode_error", status_code=status_code, detail=str(exc))
+                ) from exc
+        elif _is_pdf_content_type(content_type):
+            # `body` is already size-capped by `_stream_capped` above --
+            # exactly the same guard every other content type already
+            # goes through, nothing PDF-specific added here.
+            try:
+                text = _extract_pdf_text(bytes(body))
+            except Exception as exc:
+                raise FetchException(
+                    FetchError(url=url, reason="pdf_decode_error", status_code=status_code, detail=str(exc))
                 ) from exc
         if text and "html" in content_type.lower():
             text = _html_to_text(text)
@@ -167,6 +183,24 @@ class HttpxFetchProvider:
 
 def _is_textual_content_type(content_type: str) -> bool:
     return any(marker in content_type for marker in ("text/", "json", "xml"))
+
+
+def _is_pdf_content_type(content_type: str) -> bool:
+    return "application/pdf" in content_type.lower()
+
+
+def _extract_pdf_text(raw: bytes) -> str:
+    # Lazy import, same pattern as anthropic/playwright elsewhere in this
+    # project -- pypdf is a real, always-installed base dependency here
+    # (not gated behind an extra, unlike those two), but importing it only
+    # where it's used keeps this module's own import cost at zero for
+    # every fetch that isn't a PDF.
+    import io
+
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(raw))
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
 _CHARSET_RE = re.compile(r"charset=([\w-]+)", re.IGNORECASE)
