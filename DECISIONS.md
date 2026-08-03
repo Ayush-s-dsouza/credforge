@@ -3534,3 +3534,220 @@ change, same category of decision D-062 explicitly deferred for a
 narrower reason), which is more than this fix needed to make Alpha
 Vantage's live path work reliably. Noted here so it isn't lost, not
 built speculatively under time pressure.
+
+### D-065: DISCOVER_SIGNUP -- a recipe-generation agent, replacing hand-authorship with a one-time LLM exploration whose output is a recipe, not a credential
+
+**The premise:** all four existing recipes (`signup_recipes.py`) exist because
+a human (or an agent acting as one) opened that exact vendor's real page and
+read its DOM once, then hardcoded the result. That doesn't generalize past a
+handful of vendors -- "it works on four vendors I hand-wrote" is an
+architecture that can't scale. DISCOVER_SIGNUP inverts the cost: explore an
+unseen vendor ONCE, expensively and non-deterministically (a real LLM reads
+the rendered form and the post-submit page/email), and **emit a
+`SignupRecipe` as the output of that exploration** -- not a credential.
+Every subsequent run replays the generated recipe through the exact same
+deterministic path a hand-authored recipe already uses
+(`PlaywrightBrowserDriver.signup_and_create_app`, keyed on
+`self._recipes.get(domain)`, which has no idea whether a recipe was typed
+by a human or generated). This is the same "generate the artifact, not the
+one-off result" pattern the whole rest of this project already uses for
+its own build -- applied to itself.
+
+**Architecture:**
+
+- `providers/signup_generation.py` defines a NEW, narrower `SignupFormAnalyzer`
+  Protocol (`classify_signup_form`, `locate_credential`) -- deliberately not
+  two more methods bolted onto `providers/llm.py`'s `Extractor`. Extractor's
+  three methods all have a real, tested deterministic fallback
+  (`HeuristicExtractor`) for when `ANTHROPIC_API_KEY` is unset; "classify an
+  arbitrary vendor's signup form" and "find a credential in an arbitrary
+  page" have no comparable fallback -- that absence is the entire reason
+  this generator exists instead of another hand-written recipe. Bolting them
+  onto `Extractor` would force `HeuristicExtractor` to either fake a
+  fallback (silently wrong) or hard-fail for three of its five methods.
+  `providers/anthropic_signup_analyzer.py` is the only implementation,
+  same lazy-import-of-module discipline as `anthropic_extractor.py`, same
+  model choice (`claude-sonnet-5`, D-014's reasoning applies unchanged: a
+  per-vendor call, not open-ended reasoning, but the blockers judgment has
+  the same real-consequence shape as GATE's `prohibits_automation` call, so
+  not Haiku-tier either).
+- `SignupRecipe` (`playwright_browser.py`) gained: `full_name_field_selector`,
+  `company_field_selector` (distinct from `app_name_field_selector`, which is
+  the OAuth app's display name, not the signer's company), `extra_field_selectors`
+  (a purpose-keyed dict for required-but-uncommon fields -- phone/country/
+  use_case/other/unknown -- filled with an honestly-synthetic default,
+  `EXTRA_FIELD_DEFAULTS`, only when the source field was `required`), and
+  `generated_by`/`generated_at` (unset on every hand-authored recipe --
+  provenance is always visible just by reading a recipe, never
+  indistinguishable from a hand-verified one).
+- Generated recipes are written to `.credforge/generated_recipes/<domain>.json`
+  and merged into `PlaywrightBrowserDriver`'s recipe dict in
+  `factory.py`'s `--live` branch via `merge_recipes(generated, LIVE_SIGNUP_RECIPES)`
+  -- hand-authored always wins on a collision, extracted as its own pure,
+  directly-tested function rather than an implicit property of dict-merge
+  order.
+- `pipeline/discover_signup.py` is the top-level entry point
+  (`discover_signup()`, wired to `credforge discover-signup <app> [--live]`).
+  It reuses `orchestrator.run_app(dry_run=True)` to reach GATE rather than
+  re-deriving RESOLVE->DISCOVER->CLASSIFY->GATE itself -- GATE's verdict,
+  once reached this way, is exactly as binding as it is for a hand-authored
+  recipe; nothing downstream can change it.
+
+**Safety rails, as specified, all held:** dry-run is the default (locate,
+read, classify, print the intended field_map -- submit nothing); live
+requires an explicit flag; the registry's idempotency guard is checked
+before any browser action; every generated password is registered with the
+redaction filter before it's ever handed to Playwright; GATE is never
+touched or reasoned around.
+
+**Five real bugs found and fixed via actual live dry-run/live testing, not
+theoretical review -- each one only became visible by actually running the
+generator against a real vendor:**
+
+1. **No guess-list fallback for signup-page location.** The first version
+   only tried `developer_portal_url` + real anchor-link discovery (mirroring
+   GATE's ToS discovery, D-059) -- but GATE's own ToS discovery has a
+   *second* tier, a fixed guess-list fallback (`_TOS_URL_GUESSES`), which
+   this initial implementation omitted. Found live: api-ninjas.com,
+   twelvedata.com, and ipapi.co all have a real signup page with no
+   discoverable static `<a href>` to it at all (modern client-rendered
+   marketing sites route navigation via JS after hydration; the raw HTML
+   `FetchProvider` sees has no real links). Added `_SIGNUP_PATH_GUESSES`
+   (`/signup`, `/register`, `/get-started`, etc.), tried only after link
+   discovery finds nothing -- safe even when wrong, since the confidence/
+   no-email-field hard stops downstream catch a guess that landed on the
+   wrong page before anything is ever submitted.
+2. **`password` and `password_confirm` collapsed into one recipe field.**
+   `FieldPurpose` had no distinct value for a confirmation field; two DOM
+   elements both classified `"password"` overwrote each other in
+   `_build_recipe_from_classification`'s `kwargs["password_field_selector"]`,
+   silently losing one selector -- found live against api-ninjas.com's real
+   5-field form (first/last name, email, password, confirm). Added
+   `password_confirm` as its own purpose, mapped to `SignupRecipe`'s
+   already-existing (but previously unreachable from generation)
+   `password_confirm_field_selector`.
+3. **A cookie-consent banner blocked every submit-click attempt.** A
+   GDPR/CCPA-style overlay (`#cc-banner`) on api-ninjas.com's real signup
+   page intercepted the pointer event on every retry Playwright's
+   auto-waiting click tried, for 30s, then raised. Not vendor-specific --
+   this exact pattern can sit on top of any vendor's page -- so the fix
+   (`dismiss_cookie_banner`, a best-effort search over common consent-button
+   texts) lives in `playwright_browser.py`, not `discover_signup.py`,
+   and is used by BOTH the generation-time interaction and the
+   hand-authored-recipe replay path (`signup_and_create_app`) -- a cookie
+   banner would have silently broken *replay* of a generated recipe too,
+   not just generation.
+4. **An unhandled Playwright exception crashed instead of reporting.** The
+   cookie-banner timeout (before the fix above existed) propagated all the
+   way out of `discover_signup()` uncaught -- `HardStopError` was the only
+   caught exception type. `signup_and_create_app` already wraps its whole
+   browser-interaction block in a broad `except Exception`, converting any
+   unexpected failure into a reported `ProvisionOutcome(success=False, ...)`
+   rather than a crash; `discover_signup()` now does the same, converting
+   an unexpected error into an honest `stopped_reason` instead of taking
+   down the caller.
+5. **A CAPTCHA with zero visible DOM footprint.** Cloudflare Turnstile's
+   only trace on twelvedata.com's real register page is a *hidden*
+   `cf-turnstile-response` input -- and `_reduce_dom`'s own hidden-field
+   filter (correctly discarding real plumbing like CSRF tokens) discarded
+   it too, so the LLM's `blockers` classification never had a chance to see
+   it and correctly reported `"none"`. Fixed the same way payment-field
+   detection already works (D-004's "don't rely on a single check for
+   something this consequential" pattern, applied a second time): a
+   structural, code-only regex (`_check_structural_captcha_fields`) that
+   fires on `captcha|turnstile` in a field's raw `name`/`id`, independent
+   of whatever the LLM's own blockers judgment says -- plus keeping
+   captcha-shaped hidden fields in the reduced DOM specifically (still
+   discarding ordinary hidden plumbing) so this check, and the LLM, can
+   both actually see them.
+
+Every one of these is now covered by a direct unit test (`test_discover_signup.py`,
+`test_imap_email.py`); 283/283 tests pass.
+
+**Live-testing results -- 16 real vendors attempted, zero live credentials,
+every single failure has a known, understood mechanism (not a mystery gap):**
+
+*Account-creation archetype (SendGrid, Monday.com, currencyapi.com,
+serper.dev, newsapi.org, exchangerate-api.com, the-odds-api.com,
+opencagedata.com, newsdata.io, api-ninjas.com, twelvedata.com):* every
+single one carries real, verified bot-defense. Nine show a visible
+reCAPTCHA/hCaptcha/Turnstile widget or a bespoke math-question field,
+confirmed by direct DOM probe before ever attempting a submission. The
+remaining two -- api-ninjas.com and twelvedata.com -- passed dry-run
+completely clean (correct field maps, no visible blocker) and were only
+revealed as defended by actually submitting: api-ninjas.com's registration
+backend is AWS Cognito behind AWS WAF, returning a real `403
+ForbiddenException: Request not allowed due to WAF block` even with a
+verified-valid password (confirmed by manually POSTing with a known-good
+password and inspecting the network response -- not assumed from the error
+copy); twelvedata.com is Cloudflare Turnstile with the invisible-DOM-
+footprint problem bug #5 above documents. Both findings directly produced
+the structural hardening in bugs #3-5.
+
+*Form-to-key/no-account archetype (Congress.gov, FEC, Regulations.gov,
+NREL, The Guardian Open Platform, TheCatAPI -- the archetype NASA's and
+Alpha Vantage's hand-authored recipes both belong to):* all six are
+blocked **upstream of GATE**, before DISCOVER_SIGNUP is ever triggered --
+a categorically different failure mode from CAPTCHA/WAF, and one this
+generator correctly refuses to route around, since "GATE's verdict stays
+binding" is non-negotiable. Congress.gov and FEC's real API docs are
+served by a Swagger-UI shell (`<div id="swagger-ui"></div>`, populated by
+JS) -- confirmed live via curl that the raw HTML contains zero real
+API-marker text, so RESOLVE's deterministic content-verification
+(`_looks_like_api_docs`, D-027) correctly never offers that candidate to
+DISCOVER, and DISCOVER's own crawl reports `discovery_failed`, consistent
+across repeated attempts. Regulations.gov's real docs live on a different
+domain (`open.gsa.gov`) reached via a redirect from `api.regulations.gov`,
+but that exact path is `robots_disallowed` -- confirmed directly (`fetch()`
+raised `FetchException(reason="robots_disallowed")`); the fetch layer's
+fail-closed robots.txt handling is doing exactly what it's supposed to.
+NREL and TheCatAPI never resolved to a confident identity at all
+(`state.gate is None` -- RESOLVE itself didn't clear its own confidence
+threshold). The Guardian Open Platform resolved to `theguardian.com` (the
+newspaper, not `open-platform.theguardian.com`, its actual developer
+subdomain) and correctly reported `UNSUPPORTED`/`no_public_api` for that
+domain -- a true statement about the wrong page, the same
+different-domain-than-consumer-identity shape as Regulations.gov.
+
+**Why NASA's own hand-authored recipe isn't a counterexample to this:**
+NASA's identity is registered in `LIVE_SIGNUP_RECIPES`, which means
+`resolve()`'s D-048 pinning gives it exactly ONE trusted candidate
+(`https://api.nasa.gov/`) *without* RESOLVE's own content-verification gate
+ever being applied to it -- the pin is trusted because a human already
+confirmed it once, not because the page's raw HTML would pass
+`_looks_like_api_docs` today. Checked live, right now: `api.nasa.gov`'s raw
+HTML is a comparably thin JS shell (4737 bytes, content injected via
+`insertBlockXatY()`), and a fresh, unpinned `resolve("NASA API")` call this
+session landed on the bare `nasa.gov` homepage instead and reported
+`no_public_api` -- the exact same failure mode as Congress.gov, just for a
+vendor that happens to already have a recipe masking it. This means the
+api.data.gov family's real blocker isn't unique to Congress/FEC -- it's a
+structural mismatch between RESOLVE's strict, deterministic pre-filter and
+DISCOVER's more semantically capable (but not-yet-triggered-here) LLM call,
+that D-048's pinning happens to route around for a vendor a human already
+vouched for. This is a real, honest limitation worth naming precisely, not
+a reason to weaken RESOLVE's verification generically (a lenient RESOLVE
+would trade a real, useful guardrail against false docs pages for a
+narrower win on JS-shell-fronted government APIs specifically).
+
+**Rejected: modifying RESOLVE/DISCOVER/GATE to let a JS-thin docs page
+through, or bypassing GATE for a "probably fine" vendor.** Both would
+directly violate the one rule stated as non-negotiable for this whole
+feature -- GATE's verdict stays binding, always independently computed,
+never worked around because a specific vendor is inconvenient this run.
+
+**Rejected: treating a CAPTCHA/WAF-blocked vendor as a bug to fix.** Same
+principle as every other CAPTCHA finding this project has made (D-046,
+IPinfo's invisible reCAPTCHA, D-053) -- a real anti-automation defense is a
+finding to report, never a wall to defeat.
+
+**Verified:** 283/283 tests pass, including all five bug-fix regression
+tests above. 16 real vendors attempted live or via live dry-run this
+session (11 account-creation, 6 form-to-key with 1 overlap accounted for);
+zero produced a live credential; every one of the 16 failures traces to a
+specific, independently-confirmed mechanism (a captured WAF response body,
+a captured robots.txt exception, a curl-verified thin-HTML docs page, a
+DOM-probe-confirmed CAPTCHA widget) -- none are unexplained. The generator
+itself -- location, DOM reduction, hard stops, fill/submit, extraction,
+recipe emission -- is real, exercised code, hardened by five genuine live
+findings, not a theoretical design that was never actually run.

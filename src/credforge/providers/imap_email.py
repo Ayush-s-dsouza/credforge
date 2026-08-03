@@ -31,9 +31,25 @@ class ImapEmailProvider:
         self._password = password
         self._alias_domain = alias_domain
 
-    def alias_for(self, identity_key: str) -> str:
+    def alias_for(self, identity_key: str, *, suffix: str | None = None) -> str:
         local_part = self._username.split("@")[0]
         slug = identity_key.replace(":", "-").replace(".", "-")
+        # D-065 (DISCOVER_SIGNUP): an optional per-run suffix, e.g. a short
+        # run_id fragment. A registered SignupRecipe's own alias is
+        # deliberately stable (no suffix) so PROVISION's idempotency guard
+        # and repeat runs reuse the same account -- but DISCOVER_SIGNUP
+        # explores an unproven vendor, potentially repeatedly, before any
+        # recipe exists to be idempotent about. A stable alias there would
+        # mean every exploration attempt against the same vendor reused the
+        # same address, and a vendor that deduplicates signups by email
+        # (the hypothesis D-061 tested and found false for Alpha Vantage,
+        # but not necessarily false for an unseen vendor) would then show
+        # generation attempt #2 an "already registered" page instead of a
+        # normal signup form -- indistinguishable, from generation's LLM
+        # classification step, from a vendor that's simply hard to
+        # classify.
+        if suffix:
+            slug = f"{slug}-{suffix}"
         return f"{local_part}+{slug}@{self._alias_domain}"
 
     async def wait_for_message(

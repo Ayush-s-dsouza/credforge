@@ -15,6 +15,19 @@ def test_alias_for_uses_username_local_part_and_alias_domain() -> None:
     assert provider.alias_for("github.com") == "creds+github-com@creds.example"
 
 
+def test_alias_for_with_suffix_appends_it_to_the_slug() -> None:
+    # D-065 (DISCOVER_SIGNUP): an optional per-run suffix so repeat
+    # generation attempts against an unproven vendor don't reuse the same
+    # stable alias a registered recipe would.
+    provider = _provider()
+    assert provider.alias_for("github.com", suffix="a1b2c3d4") == "creds+github-com-a1b2c3d4@creds.example"
+
+
+def test_alias_for_without_suffix_is_unchanged_from_the_stable_form() -> None:
+    provider = _provider()
+    assert provider.alias_for("github.com", suffix=None) == provider.alias_for("github.com")
+
+
 @pytest.mark.asyncio
 async def test_wait_for_message_raises_email_timeout_error_when_nothing_matches(monkeypatch: pytest.MonkeyPatch) -> None:
     # Failure drill: a real inbox that never receives the expected message

@@ -15,6 +15,7 @@ from rich.table import Table
 
 from ..config import Settings
 from ..enums import PipelineStage, StageStatus
+from ..pipeline.discover_signup import discover_signup
 from ..pipeline.explain import NULL_EXPLAIN, ExplainEvent, ExplainSink
 from ..pipeline.orchestrator import run_app
 from ..pipeline.report import RunReport, generate_report
@@ -208,6 +209,34 @@ def batch(
     report = generate_report(run_id, data_dir=settings.data_dir)
     console.print(f"\nrun_id: {run_id}")
     _print_report_table(report)
+
+
+@app.command(name="discover-signup")
+def discover_signup_cmd(
+    app_name: str,
+    live: bool = typer.Option(
+        False, "--live",
+        help="Actually fill and submit the form, extract and vault a real credential, and emit the recipe. "
+        "Default is dry-run: locate, read, and classify the form, print what it WOULD do, submit nothing.",
+    ),
+    headed: bool = typer.Option(False, "--headed", help="Show the browser window instead of running headless"),
+) -> None:
+    """DISCOVER_SIGNUP: generate a SignupRecipe for a vendor with no existing
+    recipe. Only proceeds if GATE independently clears the app AUTO. Dry-run
+    by default -- see DECISIONS.md D-065."""
+    settings = Settings()
+    providers = build_providers(settings, live=live)
+    vault = _open_vault(settings) if live else None
+    registry = _open_registry(settings)
+    run_id = new_run_id()
+
+    result = asyncio.run(
+        discover_signup(
+            app_name, providers=providers, settings=settings, registry=registry,
+            vault=vault, run_id=run_id, live=live, headed=headed,
+        )
+    )
+    console.print_json(result.model_dump_json())
 
 
 @app.command()

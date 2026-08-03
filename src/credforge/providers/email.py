@@ -26,7 +26,7 @@ class EmailTimeoutError(Exception):
 
 
 class EmailProvider(Protocol):
-    def alias_for(self, identity_key: str) -> str: ...
+    def alias_for(self, identity_key: str, *, suffix: str | None = None) -> str: ...
 
     async def wait_for_message(
         self,

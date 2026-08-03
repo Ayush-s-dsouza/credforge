@@ -26,6 +26,7 @@ section for what installing it actually requires on the host.
 
 import re
 import uuid
+from datetime import datetime
 
 from pydantic import BaseModel, Field
 
@@ -37,14 +38,59 @@ from .email import EmailProvider
 # The identity credforge signs up with when a vendor's form asks for a
 # person's name -- not a real person, and deliberately not disguised as
 # one (no invented surname pretending to be an employee).
-_SIGNUP_FIRST_NAME = "Credforge"
-_SIGNUP_LAST_NAME = "Agent"
+SIGNUP_FIRST_NAME = "Credforge"
+SIGNUP_LAST_NAME = "Agent"
+SIGNUP_FULL_NAME = f"{SIGNUP_FIRST_NAME} {SIGNUP_LAST_NAME}"
+SIGNUP_COMPANY = "Credforge"
+
+# D-065 (DISCOVER_SIGNUP): synthetic defaults for form fields a generated
+# recipe classified as required but that don't have a dedicated named
+# selector on SignupRecipe -- same "sensible default, honestly synthetic,
+# never disguised as a real person" principle as the two constants above.
+# Only reached for a field DISCOVER_SIGNUP's LLM classification marked
+# `required`; an optional field of one of these purposes is simply left
+# blank. See DECISIONS.md D-065.
+EXTRA_FIELD_DEFAULTS: dict[str, str] = {
+    "phone": "+15555550100",
+    "country": "United States",
+    "use_case": "API integration testing",
+    "other": "N/A",
+    "unknown": "N/A",
+}
 
 
 def _generate_username() -> str:
     # Some vendors (OpenWeatherMap) require a globally-unique username
     # separate from email -- random suffix avoids a collision on retry.
     return f"credforge-agent-{uuid.uuid4().hex[:10]}"
+
+
+# D-065 (DISCOVER_SIGNUP): a cookie-consent overlay is not vendor-specific --
+# a generic, GDPR/CCPA-driven pattern that can sit on top of literally any
+# vendor's page, found live: api-ninjas.com's real signup form filled
+# correctly, but every submit-click attempt failed because `#cc-banner`
+# intercepted the pointer event. This is exactly "the genuinely generic
+# part" this driver already claims to handle (see this module's own
+# docstring) -- not a per-vendor workaround, so it lives here, used by both
+# this driver's hand-authored-recipe replay path AND
+# pipeline/discover_signup.py's generation-time interaction. Best-effort:
+# if no matching button is found, or clicking it fails for any reason,
+# this is a silent no-op -- most vendors have no such banner at all.
+COOKIE_CONSENT_BUTTON_TEXTS = (
+    "Accept All", "Accept all", "Accept", "I Agree", "I agree", "Agree",
+    "Got it", "Allow all", "Allow All", "OK", "Ok",
+)
+
+
+async def dismiss_cookie_banner(page) -> None:
+    for text in COOKIE_CONSENT_BUTTON_TEXTS:
+        try:
+            locator = page.get_by_role("button", name=text, exact=False)
+            if await locator.count() > 0:
+                await locator.first.click(timeout=2000)
+                return
+        except Exception:
+            continue
 
 
 class SignupRecipe(BaseModel):
@@ -131,6 +177,33 @@ class SignupRecipe(BaseModel):
     # selectors exist, and PROVISION failed).
     developer_portal_url_fallback: str | None = None
 
+    # D-065 (DISCOVER_SIGNUP): fields a *generated* recipe needs that no
+    # hand-authored recipe so far has required. `full_name_field_selector`
+    # covers a single "Full Name" input (as opposed to split
+    # first/last_name_field_selector above); `company_field_selector`
+    # covers "organization"/"company" as its own concept, distinct from
+    # `app_name_field_selector` (the OAuth *app's* display name -- Alpha
+    # Vantage's recipe repurposes app_name_field_selector for its
+    # "organization" field for exactly this reason, a workaround this
+    # field makes unnecessary for anything generated from here on).
+    # `extra_field_selectors` holds every other classified-but-uncommon
+    # purpose (phone/country/use_case/other/unknown) that was `required`
+    # on the source form, keyed by that purpose string -- filled with a
+    # clearly-synthetic default (EXTRA_FIELD_DEFAULTS) rather than either
+    # inventing a named field per rare purpose or leaving a required field
+    # empty and letting submission fail.
+    full_name_field_selector: str | None = None
+    company_field_selector: str | None = None
+    extra_field_selectors: dict[str, str] = Field(default_factory=dict)
+
+    # Provenance: unset for every hand-authored recipe in this file (all
+    # four were read and written by a human directly). Set only by
+    # DISCOVER_SIGNUP, so a recipe's origin is always visible just by
+    # reading it -- never silently indistinguishable from a hand-verified
+    # one. See DECISIONS.md D-065.
+    generated_by: str | None = None
+    generated_at: datetime | None = None
+
 
 class PlaywrightBrowserDriver:
     def __init__(self, *, recipes: dict[str, SignupRecipe] | None = None) -> None:
@@ -169,15 +242,22 @@ class PlaywrightBrowserDriver:
             try:
                 page = await browser.new_page()
                 await page.goto(developer_portal_url)
+                await dismiss_cookie_banner(page)
                 steps.append(ProvisionStepResult(step="navigate_to_signup", success=True))
 
                 await page.fill(recipe.email_field_selector, email_alias)
                 if recipe.first_name_field_selector:
-                    await page.fill(recipe.first_name_field_selector, _SIGNUP_FIRST_NAME)
+                    await page.fill(recipe.first_name_field_selector, SIGNUP_FIRST_NAME)
                 if recipe.last_name_field_selector:
-                    await page.fill(recipe.last_name_field_selector, _SIGNUP_LAST_NAME)
+                    await page.fill(recipe.last_name_field_selector, SIGNUP_LAST_NAME)
+                if recipe.full_name_field_selector:
+                    await page.fill(recipe.full_name_field_selector, SIGNUP_FULL_NAME)
                 if recipe.username_field_selector:
                     await page.fill(recipe.username_field_selector, _generate_username())
+                if recipe.company_field_selector:
+                    await page.fill(recipe.company_field_selector, SIGNUP_COMPANY)
+                for purpose, selector in recipe.extra_field_selectors.items():
+                    await page.fill(selector, EXTRA_FIELD_DEFAULTS.get(purpose, "N/A"))
 
                 account_password_used: str | None = None
                 if recipe.password_field_selector:

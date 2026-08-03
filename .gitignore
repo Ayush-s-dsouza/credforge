@@ -19,6 +19,7 @@ htmlcov/
 scripts/scratch_run.py
 scripts/scratch_full_run.py
 scripts/scratch_probe.py
+scripts/scratch_discover_signup.py
 scratch_batch_output/
 
 # personal interview prep, not a submitted deliverable -- kept on a

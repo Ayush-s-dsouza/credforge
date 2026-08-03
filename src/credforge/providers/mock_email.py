@@ -16,8 +16,10 @@ class MockEmailProvider:
     def __init__(self, *, alias_domain: str = "example.com") -> None:
         self._alias_domain = alias_domain
 
-    def alias_for(self, identity_key: str) -> str:
+    def alias_for(self, identity_key: str, *, suffix: str | None = None) -> str:
         slug = identity_key.replace(":", "-").replace(".", "-")
+        if suffix:
+            slug = f"{slug}-{suffix}"
         return f"credforge+{slug}@{self._alias_domain}"
 
     async def wait_for_message(

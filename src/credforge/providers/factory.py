@@ -75,6 +75,7 @@ def build_providers(settings: Settings, *, live: bool = False) -> ProviderBundle
                 "--live requires CREDFORGE_IMAP_HOST, CREDFORGE_IMAP_USER, and "
                 "CREDFORGE_IMAP_PASSWORD to be set (see .env.example)"
             )
+        from ..pipeline.discover_signup import load_generated_recipes, merge_recipes
         from ..redaction import register_secret
         from .imap_email import ImapEmailProvider
         from .playwright_browser import PlaywrightBrowserDriver
@@ -89,7 +90,16 @@ def build_providers(settings: Settings, *, live: bool = False) -> ProviderBundle
             password=imap_password,
             alias_domain=settings.email_alias_domain,
         )
-        browser = PlaywrightBrowserDriver(recipes=LIVE_SIGNUP_RECIPES)
+        # D-065 (DISCOVER_SIGNUP): a generated recipe is loaded from disk and
+        # merged in here -- the same PlaywrightBrowserDriver, same
+        # `self._recipes.get(domain)` lookup, zero special-casing between a
+        # recipe a human wrote and one DISCOVER_SIGNUP generated. Merge
+        # order matters: LIVE_SIGNUP_RECIPES (hand-authored, human-verified)
+        # is applied SECOND so it always wins if the same domain somehow has
+        # both -- a generated recipe never overrides one a human already
+        # checked by hand.
+        recipes = merge_recipes(load_generated_recipes(settings.data_dir), LIVE_SIGNUP_RECIPES)
+        browser = PlaywrightBrowserDriver(recipes=recipes)
     else:
         email = MockEmailProvider(alias_domain=settings.email_alias_domain)
         browser = MockBrowserDriver()
