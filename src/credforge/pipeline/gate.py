@@ -37,6 +37,14 @@ down every expected field) is deliberately NOT a precondition that routes
 to HITL, unlike DISCOVERY_FAILED. It's carried forward as a `completeness`
 gap list instead -- a missing field in prose is not something a human
 needs to unblock; see DECISIONS.md D-029.
+
+A requires_payment=True flag from either source is adjusted before it's
+used: payment language scoped to a specific endpoint or data tier ("this
+is a premium endpoint") is not the same claim as payment language scoped
+to API access itself ("API access requires a paid plan"), and only the
+extractor's raw flag doesn't distinguish them. Genuinely unscoped
+language still always blocks. See DECISIONS.md D-057 for the real false
+HITL this fixes.
 """
 
 from ..enums import ApiStyle, PipelineStage, ReasonCode, Status
@@ -80,6 +88,81 @@ def _completeness_gaps(extraction: DiscoveryExtraction, *, api_style: ApiStyle |
         if getattr(extraction, field_name) is None
         and not (api_style == ApiStyle.GRAPHQL and field_name in _REST_ONLY_COMPLETENESS_FIELDS)
     ]
+
+# D-057: a real live case (Alpha Vantage) showed the extractor's raw
+# requires_payment flag doesn't distinguish payment language SCOPED to a
+# specific endpoint/data-tier from UNSCOPED language stating API access
+# itself requires payment -- "This is a premium endpoint... please
+# subscribe to a premium membership plan" describes ONE realtime/
+# historical-data endpoint, not the free API key credforge actually
+# acquires, but the extractor flagged requires_payment=True from it alone
+# and GATE blocked PROVISION on a vendor with a real, working free tier.
+#
+# Interpretation of "must not trigger on its own" (deliberately explicit,
+# since the spec allows more than one reading): scoped language ALONE is
+# sufficient to suppress -- it does not additionally require free-tier
+# evidence to also be present. FREE-TIER OVERRIDE is a second, independent
+# path to the same suppression (covers a page whose payment language
+# doesn't literally match a SCOPED marker but where free-tier evidence is
+# still present) rather than a precondition layered on top of SCOPED.
+# UNSCOPED language always wins over both, checked first, regardless of
+# scoped or free-tier language appearing elsewhere on the very same page --
+# a vendor that mentions a free tier AND separately states API access
+# itself requires a paid plan is a real, mixed-tier vendor that still
+# needs a human, not something this override should silently clear.
+_SCOPED_PAYMENT_MARKERS = (
+    "this is a premium endpoint",
+    "premium endpoint",
+    "this endpoint requires",
+    "realtime data",
+    "historical data",
+    "intraday data",
+    "delayed data",
+    "for commercial use",
+    "premium membership plan",
+    "upgrade to access",
+)
+_UNSCOPED_PAYMENT_MARKERS = (
+    "api access requires a paid plan",
+    "you must subscribe to use the api",
+    "no free tier",
+    "a paid account is required to obtain an api key",
+    "credit card required to sign up",
+)
+_FREE_TIER_OVERRIDE_MARKERS = (
+    "free api key",
+    "claim your free api key",
+    "free tier",
+    "get started for free",
+    "no credit card required",
+)
+
+
+def _payment_signal_is_false_positive(source_text: str, *, developer_portal_url: str | None) -> bool:
+    """True when a requires_payment=True flag from this source should be
+    treated as a false positive rather than a real block. See the module-
+    level comment above _SCOPED_PAYMENT_MARKERS for the precedence this
+    implements, and DECISIONS.md D-057 for the real case that motivated it."""
+    lower = source_text.lower()
+    if any(marker in lower for marker in _UNSCOPED_PAYMENT_MARKERS):
+        return False
+
+    scoped_hit = any(marker in lower for marker in _SCOPED_PAYMENT_MARKERS)
+    free_tier_hit = any(marker in lower for marker in _FREE_TIER_OVERRIDE_MARKERS) or (
+        developer_portal_url is not None and "api-key" in developer_portal_url.lower()
+    )
+    return scoped_hit or free_tier_hit
+
+
+def _adjust_for_scoped_payment_language(
+    signals: TosGateExtraction, *, source_text: str, developer_portal_url: str | None
+) -> TosGateExtraction:
+    if not signals.requires_payment:
+        return signals
+    if not _payment_signal_is_false_positive(source_text, developer_portal_url=developer_portal_url):
+        return signals
+    return signals.model_copy(update={"requires_payment": False})
+
 
 _TOS_URL_GUESSES = (
     "/developers/terms",
@@ -230,9 +313,18 @@ async def gate(
     # See DECISIONS.md D-040.
     signal_sources: list[_SignalSource] = []
 
+    # D-057: the developer_portal_url extractors like AnthropicExtractor
+    # report is real signal too (Alpha Vantage's own is literally the
+    # free-key signup page) -- available regardless of which source's
+    # signals are being adjusted.
+    developer_portal_url = discovery.extraction.developer_portal_url if discovery.extraction else None
+
     if discovery.docs_text and discovery.docs_url:
         docs_signals = await extractor.extract_tos_gate_signals(
             tos_text=discovery.docs_text, tos_url=discovery.docs_url
+        )
+        docs_signals = _adjust_for_scoped_payment_language(
+            docs_signals, source_text=discovery.docs_text, developer_portal_url=developer_portal_url
         )
         signal_sources.append(("developer docs", discovery.docs_url, docs_signals))
 
@@ -240,6 +332,9 @@ async def gate(
     if tos_found is not None:
         tos_url, tos_text = tos_found
         tos_signals = await extractor.extract_tos_gate_signals(tos_text=tos_text, tos_url=tos_url)
+        tos_signals = _adjust_for_scoped_payment_language(
+            tos_signals, source_text=tos_text, developer_portal_url=developer_portal_url
+        )
         signal_sources.append(("Terms of Service", tos_url, tos_signals))
     else:
         explain.emit(

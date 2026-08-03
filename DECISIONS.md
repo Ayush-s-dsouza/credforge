@@ -2844,3 +2844,113 @@ both real overlap (`max_in_flight > 1`) and a wall-clock ceiling
 (<300ms) that a strictly sequential loop could not meet (>=500ms) --
 proves the concurrency mechanism itself, independent of the rate
 limiter's separate, dominant effect measured above.
+
+### D-057: A false HITL -- GATE's `requires_payment` didn't distinguish payment language scoped to one endpoint from payment language scoped to API access itself
+
+**A third failure class, distinct from both families named so far.**
+D-038/D-039/D-053 were the pipeline reporting success it hadn't earned.
+D-054 was the artifact contradicting itself about the same fact. This one
+is neither: GATE produced a single, internally-consistent, wrong verdict
+-- `requires_payment`, blocking PROVISION on a vendor that has a real,
+working free tier. Alpha Vantage's own real docs state: *"This is a
+premium endpoint. If you would like to access realtime, 15-minute
+delayed, and/or historical intraday data, please subscribe to a premium
+membership plan."* That sentence scopes to specific realtime/historical
+endpoints and data tiers -- it does not say API access requires payment.
+Proof it's false, not a judgment call: a real Alpha Vantage API key was
+acquired live in 5.59s two days before this bug was found (D-052/D-053),
+and the artifact's own `developer_portal_url` is
+`alphavantage.co/support/#api-key` -- the free-key signup page, extracted
+from the same docs page GATE flagged.
+
+**Root cause:** `TosGateExtraction.requires_payment` is a single boolean
+-- the extractor (heuristic or Anthropic) reports whether *any* payment
+language was found, with no distinction between "this specific endpoint
+costs money" (true of nearly every real API with a paid tier, including
+ones with a genuinely free key) and "you cannot get a credential at all
+without paying." GATE trusted the raw flag unconditionally.
+
+**Likely why this was never caught until now, and why it's fallout from
+the GATE precedence fix, not a new regression:** before D-040 (GATE
+reading every real signal source, not just a first-found one) and before
+D-049/D-054 (the source-tier fixes that materially reduced how often
+`CLASSIFY_LOW_CONFIDENCE` fires), a real fraction of apps never reached
+GATE's payment-scanning code at all -- they short-circuited earlier,
+at RESOLVE or CLASSIFY. D-049's own measured effect was VENDOR_BLOCKED
+going from 0 to 2 in the seed batch specifically *because* GATE started
+reaching the real payment/business signals on pages it previously never
+got to read. That fix was correct and the two blocks it found
+(OpenWeatherMap, Spotify) were real. But widening how often GATE's real
+signal-scan runs to completion also widens exposure to any latent gap
+*inside* that scan -- and the scoped-vs-unscoped ambiguity was always
+there in the extraction layer, simply never exercised against a page
+shaped like Alpha Vantage's until a live run actually reached it. Same
+mechanism as D-054's Linear finding (a fix that reaches GATE's real
+checks more often surfaces both real blocks it was missing AND latent
+bugs in those checks themselves) -- not a coincidence that both showed up
+in the same pass of live-testing previously-unreached code paths.
+
+**Fixed:** `gate.py` gains `_payment_signal_is_false_positive()`, applied
+to `requires_payment` from *every* signal source (the already-crawled
+docs page and the dedicated ToS page, D-040) against that source's own
+raw text -- not the extractor's evidence snippet, which mixes evidence
+for all seven flags together and can't be cleanly attributed to just
+this one. Three marker sets, checked in this precedence:
+
+1. **UNSCOPED** (`"api access requires a paid plan"`, `"you must
+   subscribe to use the api"`, `"no free tier"`, `"a paid account is
+   required to obtain an api key"`, `"credit card required to sign
+   up"`) -- checked first; if any matches, `requires_payment` is left
+   alone, full stop, regardless of anything else on the page.
+2. **SCOPED** (`"this is a premium endpoint"`, `"premium endpoint"`,
+   `"this endpoint requires"`, `"realtime data"`, `"historical data"`,
+   `"intraday data"`, `"delayed data"`, `"for commercial use"`,
+   `"premium membership plan"`, `"upgrade to access"`) -- a match alone
+   is sufficient to suppress; no additional free-tier confirmation is
+   required.
+3. **FREE-TIER OVERRIDE** (`"free api key"`, `"claim your free api
+   key"`, `"free tier"`, `"get started for free"`, `"no credit card
+   required"`, or a `developer_portal_url` containing `"api-key"`) -- an
+   independent second path to suppression, not a precondition layered on
+   top of SCOPED. Covers a page whose payment language doesn't literally
+   match a SCOPED marker but where free-tier evidence is still present.
+
+**A deliberate interpretation call, stated explicitly because the
+request supports more than one reading:** "SCOPED... must not trigger
+requires_payment on its own" could mean scoped language alone suffices
+to suppress, or that it needs the free-tier override as corroboration.
+Chosen: alone suffices -- SCOPED and FREE-TIER OVERRIDE are two
+independent, OR'd paths to the same suppression, both beaten by UNSCOPED.
+This makes every listed marker category load-bearing rather than leaving
+FREE-TIER OVERRIDE as dead-code reinforcement of a rule SCOPED already
+covers on its own.
+
+**Rejected: fixing this in the extraction prompt instead of GATE.**
+Would help the Anthropic path specifically, but this project's own
+established rule is that tests never call a live LLM -- a prompt-only fix
+would be fundamentally unverifiable by the test suite, and would do
+nothing for the heuristic extractor (which doesn't have this distinction
+either, and is the default with no `ANTHROPIC_API_KEY`). A deterministic
+override in GATE, applied uniformly regardless of which extractor
+produced the raw flag, is the only version of this fix that's actually
+testable and that helps both paths. The prompt is unchanged; a real
+future improvement, not attempted here.
+
+**Rejected: applying the same scoped/unscoped distinction to the other
+six `TosGateExtraction` flags** (business verification, sales contact,
+phone verification, CAPTCHA, SSO-only, prohibition). Real HITL found this
+specific false positive on this specific flag; generalizing to flags with
+no observed false positive would be scope creep past what was actually
+reported.
+
+**Verified:** `tests/pipeline/test_gate.py` -- scoped language alone
+clears to AUTO; genuinely unscoped language still blocks; the free-tier
+override suppresses even with no SCOPED marker present; a
+`developer_portal_url` containing `api-key` suppresses with no free-tier
+text marker at all; unscoped wins even when scoped and free-tier language
+both appear in the same text (the real Open-Meteo shape); the override
+applies to both signal sources, not just one. Two explicit regression
+guards: an Etsy-shaped unscoped automation prohibition and an
+Open-Meteo-shaped unscoped payment requirement both still produce their
+real, correct HITL verdicts -- this fix cannot silently clear a genuine
+block. 236/236 tests pass including all of the above.
