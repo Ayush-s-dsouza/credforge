@@ -3330,3 +3330,52 @@ existing `PlaywrightBrowserDriver` regex-matching tests
 (`test_recipe_with_no_extraction_mechanism_fails_instead_of_reporting_empty_success`
 and the extraction-branch logic it exercises) are unaffected. 253/253
 tests pass.
+
+### D-062: The webapp's mocked-credential block is marked, not silently contradicting the mode banner it sits under
+
+**The bug, same class as D-054's source-tier contradiction:** PROVISION
+still runs (mocked, `MockBrowserDriver`) for any app that reaches GATE
+`AUTO` on a non-live webapp run, matching the CLI's own default
+mocked-PROVISION behavior (D-031) -- this was never wrong. What was
+wrong: the run's own mode banner states up front, correctly, that
+"credential acquisition is not attempted" for this run, and then the
+same run's artifact carries a fully populated `credential` block --
+real vault refs, a `mock-client-`/`mock-secret-`-prefixed value -- with
+nothing distinguishing it from a genuine one. Two parts of the same
+page asserting different things about the same fact.
+
+**Fixed at the webapp response layer only, not the core schema:**
+`webapp/main.py` adds `artifact_dict["credential"]["mocked"] = True` to
+the dict actually sent over SSE, whenever `not use_live` and a credential
+block is present -- `HandoffArtifact`/`CredentialInfo` (the frozen,
+shared pydantic schema the CLI, tests, and examples all also use) are
+untouched. The frontend renders an explicit warning line above the raw
+artifact JSON when this flag is present, so it isn't only visible to
+someone who reads the JSON closely.
+
+**Rejected: suppressing the credential block entirely for non-live
+runs**, the other option on the table. Marking it keeps this project's
+consistent rule (state which mode ran, never hide it, D-047 through
+D-061 have all been about exactly this) -- suppressing it would remove
+real, working, demonstrable information (the mocked flow genuinely
+exercises PROVISION's idempotency/vault/registry control flow, D-031's
+whole reason for existing) rather than just labelling it honestly.
+
+**Rejected: adding `mocked` to the core `CredentialInfo` pydantic
+model.** Would propagate the concept everywhere the schema is used (CLI
+output, `report.json`, seed-batch examples, the artifact contract the
+downstream toolkit-generation agent consumes) for a distinction that
+only exists because the *webapp specifically* runs PROVISION
+unconditionally regardless of its own mode banner. The CLI has no
+banner to contradict in the first place -- `credforge run <app>` never
+claims acquisition wasn't attempted, so there's nothing for its mocked
+credential to contradict. A wider schema change for a narrower, webapp-
+only problem was more than the fix needed.
+
+**Verified:** manual webapp smoke test (`/api/status` responds cleanly
+after the change); the fix is additive JSON-dict-only and touches no
+pipeline code, so the full 253-test suite (unchanged by this entry)
+remains the relevant regression guard. No new automated test added
+under this timebox -- the fix is two lines of dict manipulation plus a
+frontend conditional, verified by direct inspection of the sent
+payload shape, not left unverified.

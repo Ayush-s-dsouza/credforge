@@ -279,6 +279,9 @@ async function runApp() {
         } else if (evt.type === 'done') {
           const art = evt.artifact;
           appendLine(`<strong class="status-${art.status}">${art.status}</strong> / ${art.reason_code}`);
+          if (art.credential && art.credential.mocked) {
+            appendLine(`<span class="warn">credential block below is MOCKED -- this run's mode banner already said credential acquisition was not attempted; PROVISION still ran a mock signup for this AUTO app (matching the CLI's own default behavior), and nothing here is a real vaulted secret.</span>`);
+          }
           document.getElementById('run-artifact').textContent = JSON.stringify(art, null, 2);
           document.getElementById('run-artifact').style.display = 'block';
           if (art.status === 'HITL') renderHitl(document.getElementById('run-hitl'), art);

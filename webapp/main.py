@@ -355,7 +355,23 @@ async def api_run(request: Request, k: str | None = Query(None)) -> StreamingRes
                     # the frontend parses these into clickable re-run cards.
                     safe_json = scrub_secrets(artifact.model_dump_json())
                     _assert_no_raw_credential(artifact)
-                    await queue.put({"type": "done", "artifact": json.loads(safe_json)})
+                    artifact_dict = json.loads(safe_json)
+                    # D-062: PROVISION still runs (mocked) for an AUTO app
+                    # even on a non-live run, matching the CLI's own
+                    # default mocked-PROVISION behavior (D-031) -- but the
+                    # mode banner already told this run's viewer that
+                    # credential acquisition was "not attempted". Left
+                    # unmarked, the credential block below it (real vault
+                    # refs, a mock-client-/mock-secret- prefixed value)
+                    # would silently contradict that banner -- same class
+                    # of bug as the source-tier contradiction (D-054): two
+                    # parts of the same output asserting different things
+                    # about the same fact. Marked explicitly, not
+                    # suppressed -- this project's own rule throughout is
+                    # to state which mode ran, never hide it.
+                    if not use_live and artifact_dict.get("credential") is not None:
+                        artifact_dict["credential"]["mocked"] = True
+                    await queue.put({"type": "done", "artifact": artifact_dict})
             except SearchProviderError:
                 await queue.put(
                     {
