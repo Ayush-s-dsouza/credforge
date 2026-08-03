@@ -159,9 +159,19 @@ async def run_app(
             if state.provision.client_id:
                 credential["client_id"] = state.provision.client_id
 
+            validation_endpoint = extraction.validation_endpoint if extraction else None
+            if validation_endpoint is None:
+                # D-063: fallback only -- never overrides a real DISCOVER
+                # extraction, and does not touch GATE's verdict at all.
+                from ..providers.signup_recipes import LIVE_SIGNUP_RECIPES
+
+                recipe = LIVE_SIGNUP_RECIPES.get(state.identity_key)
+                if recipe is not None and recipe.validation_endpoint_fallback is not None:
+                    validation_endpoint = recipe.validation_endpoint_fallback
+
             state.validation = await validate(
                 state.identity_key,
-                validation_endpoint=extraction.validation_endpoint if extraction else None,
+                validation_endpoint=validation_endpoint,
                 base_url=extraction.base_url if extraction else None,
                 auth_scheme=state.classify.auth_scheme.value if state.classify.auth_scheme else "none",
                 credential=credential,

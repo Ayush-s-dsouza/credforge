@@ -74,16 +74,23 @@ def _build_auth_headers(auth_scheme: str, credential: dict[str, str]) -> dict[st
 
 
 def _api_key_check_variants(check_url: str, credential: dict[str, str]) -> list[tuple[str, dict[str, str]]]:
-    """Real-world API_KEY placement varies by vendor on an axis a single
-    header can't represent: a query parameter (NASA's real convention --
-    `?api_key=...` -- and common across many public APIs) versus a custom
-    header (`X-API-Key`). Query param tried first since it's the more
-    common convention for bare API-key auth specifically; both are real,
-    observed conventions, not a guess at an unknown one. See DECISIONS.md
-    D-044."""
+    """Real-world API_KEY placement varies by vendor on two axes: query
+    param vs. header (D-044), and -- confirmed live, D-063 -- the query
+    param *name* itself: api.nasa.gov wants `api_key`, alphavantage.co
+    wants `apikey` (no underscore), verified by directly calling both with
+    each spelling rather than assuming one convention is universal.
+    `apikey` is tried first: if a vendor rejects an unrecognized param name
+    outright (NASA does, with a 401 -- confirmed live), the bad-credential
+    retry loop below already falls through to the next variant, so trying
+    the less-common spelling first costs nothing on vendors that reject it
+    cleanly. Only a vendor that silently accepts *any* query param name
+    with a 200 (see the alphavantage.co finding in D-063) would let a wrong
+    variant look like it "passed" -- that's a vendor-side limitation, not
+    something reordering variants can fix."""
     key = credential.get("api_key") or credential.get("key") or next(iter(credential.values()), "")
     separator = "&" if "?" in check_url else "?"
     return [
+        (f"{check_url}{separator}apikey={key}", {}),
         (f"{check_url}{separator}api_key={key}", {}),
         (check_url, {"X-API-Key": key}),
     ]

@@ -17,6 +17,7 @@ htmlcov/
 
 # ad-hoc manual-exploration script, not a build deliverable
 scripts/scratch_run.py
+scripts/scratch_full_run.py
 scratch_batch_output/
 
 # personal interview prep, not a submitted deliverable -- kept on a

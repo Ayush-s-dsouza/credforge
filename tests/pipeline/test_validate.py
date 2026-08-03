@@ -75,33 +75,45 @@ async def test_bearer_token_is_sent_as_authorization_header() -> None:
 
 
 @pytest.mark.asyncio
-async def test_api_key_tries_query_param_first_then_header() -> None:
-    # D-044: real API_KEY placement varies across two axes a single
-    # header can't cover -- query param (NASA's real convention) is
-    # tried first, header second, only if the query-param attempt itself
-    # failed (not just "a different URL wasn't in this fake's map").
-    fetch = FakeFetchProvider({"https://api.example.com/user": _resp(200)})
+async def test_api_key_tries_query_param_variants_then_header() -> None:
+    # D-044/D-063: real API_KEY placement varies across two axes a single
+    # header can't cover -- query param NAME (apikey vs api_key, confirmed
+    # live: alphavantage.co wants the former, api.nasa.gov the latter) is
+    # tried first in both spellings, header last, retrying only on a
+    # genuine bad-credential (401) rejection.
+    fetch = FakeFetchProvider({
+        "https://api.example.com/user?apikey=key123": _resp(401, "invalid"),
+        "https://api.example.com/user?api_key=key123": _resp(401, "invalid"),
+        "https://api.example.com/user": _resp(200),
+    })
 
     await validate(
         "example.com", validation_endpoint="/user", base_url="https://api.example.com",
         auth_scheme="api_key", credential={"api_key": "key123"}, fetch=fetch,
     )
 
-    assert len(fetch.calls) == 2
-    query_url, _, query_headers = fetch.calls[0]
-    assert query_url == "https://api.example.com/user?api_key=key123"
-    assert query_headers == {}
-    header_url, _, header_headers = fetch.calls[1]
+    assert len(fetch.calls) == 3
+    apikey_url, _, apikey_headers = fetch.calls[0]
+    assert apikey_url == "https://api.example.com/user?apikey=key123"
+    assert apikey_headers == {}
+    api_key_url, _, api_key_headers = fetch.calls[1]
+    assert api_key_url == "https://api.example.com/user?api_key=key123"
+    assert api_key_headers == {}
+    header_url, _, header_headers = fetch.calls[2]
     assert header_url == "https://api.example.com/user"
     assert header_headers["X-API-Key"] == "key123"
 
 
 @pytest.mark.asyncio
 async def test_api_key_succeeds_on_query_param_alone_real_nasa_shape() -> None:
-    # The real vendor shape that motivated this: NASA's actual API
-    # accepts the key only as ?api_key=..., never as a header. A single
-    # successful attempt, no fallback needed.
-    fetch = FakeFetchProvider({"https://api.nasa.gov/planetary/apod?api_key=DEMO_KEY": _resp(200)})
+    # The real vendor shape that motivated this: NASA's actual API accepts
+    # the key only as ?api_key=..., rejecting the unrecognized `apikey=`
+    # spelling with a 401 (confirmed live) -- so the bad-credential retry
+    # falls through to the correct spelling on the very next attempt.
+    fetch = FakeFetchProvider({
+        "https://api.nasa.gov/planetary/apod?apikey=DEMO_KEY": _resp(401, "invalid api_key"),
+        "https://api.nasa.gov/planetary/apod?api_key=DEMO_KEY": _resp(200),
+    })
 
     result = await validate(
         "nasa.gov", validation_endpoint="GET /planetary/apod", base_url="https://api.nasa.gov",
@@ -109,7 +121,7 @@ async def test_api_key_succeeds_on_query_param_alone_real_nasa_shape() -> None:
     )
 
     assert result.status == "valid"
-    assert len(fetch.calls) == 1  # succeeded on the first (query-param) attempt -- no fallback needed
+    assert len(fetch.calls) == 2  # wrong spelling rejected, correct spelling succeeds next
 
 
 @pytest.mark.asyncio
@@ -117,7 +129,7 @@ async def test_api_key_stops_retrying_on_a_non_credential_failure() -> None:
     # A 404 (wrong base URL) or a rate limit won't be fixed by moving the
     # same key to a different placement -- only a bad-credential
     # rejection is worth retrying with the next variant.
-    fetch = FakeFetchProvider({"https://api.example.com/user?api_key=key123": _resp(404, "Not Found")})
+    fetch = FakeFetchProvider({"https://api.example.com/user?apikey=key123": _resp(404, "Not Found")})
 
     result = await validate(
         "example.com", validation_endpoint="/user", base_url="https://api.example.com",
@@ -210,7 +222,7 @@ async def test_checked_url_never_leaks_the_raw_api_key_from_the_query_param_vari
     # (fetch.calls proves that); only the *stored* checked_url must be
     # scrubbed.
     real_key = "a-real-looking-forty-char-api-key-abcdef01"
-    fetch = FakeFetchProvider({f"https://api.example.com/user?api_key={real_key}": _resp(200)})
+    fetch = FakeFetchProvider({f"https://api.example.com/user?apikey={real_key}": _resp(200)})
 
     result = await validate(
         "example.com", validation_endpoint="/user", base_url="https://api.example.com",
@@ -221,7 +233,7 @@ async def test_checked_url_never_leaks_the_raw_api_key_from_the_query_param_vari
     assert real_key not in result.checked_url
     assert "***REDACTED***" in result.checked_url
     # the real request itself still used the real key -- only the stored value is scrubbed
-    assert fetch.calls[0][0] == f"https://api.example.com/user?api_key={real_key}"
+    assert fetch.calls[0][0] == f"https://api.example.com/user?apikey={real_key}"
 
 
 @pytest.mark.asyncio

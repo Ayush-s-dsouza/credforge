@@ -3379,3 +3379,85 @@ remains the relevant regression guard. No new automated test added
 under this timebox -- the fix is two lines of dict manipulation plus a
 frontend conditional, verified by direct inspection of the sent
 payload shape, not left unverified.
+
+### D-063: A recipe-pinned VALIDATE fallback, plus a real vendor-behavior finding it exposed -- the query-param *name* wasn't the only thing hardcoded wrong, and one vendor doesn't check the key at all
+
+**The premise going in:** D-061's live run acquired a real Alpha Vantage
+key but VALIDATE returned `validation_failed_unknown` because that run's
+own LLM extraction didn't populate `validation_endpoint` (see D-061's
+"one more honest, real observation"). A credential that's never been
+test-called isn't a credential worth handing off -- so `SignupRecipe`
+gained an optional `validation_endpoint_fallback`, used by the
+orchestrator only when `extraction.validation_endpoint is None`, exactly
+mirroring D-048's identity-pinning rule: a recipe supplies a fallback, it
+never overrides what DISCOVER actually found, and GATE's own verdict
+(computed before PROVISION even runs) is untouched. `ALPHA_VANTAGE` was
+pinned to `"GET https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=IBM"`.
+
+**Verifying the "key as query param -- that placement is already
+handled" assumption found it wasn't, on two different axes:**
+
+1. **Param name.** `validate.py`'s `_api_key_check_variants` hardcoded
+   `?api_key=...` (NASA's real convention). Calling Alpha Vantage's real
+   endpoint directly with each spelling: `apikey=<anything>` returns real
+   quote data; `api_key=<anything>` (the old hardcoded name) returns
+   `{"Error Message": "the parameter apikey is invalid or missing..."}`
+   -- still HTTP 200, so the old code would have silently sent the wrong
+   param and still reported `status="valid"` by accident of Alpha
+   Vantage's status-code habits, not because the mechanism was actually
+   correct. Fixed by adding `apikey` as a third query-param-name variant,
+   tried first (D-044's placement axis now has a name axis alongside it:
+   `apikey` first, `api_key` second, `X-API-Key` header last). Real
+   vendors disagree on this and neither spelling is more "correct" --
+   NASA needs `api_key`, Alpha Vantage needs `apikey`, both now confirmed
+   live rather than assumed.
+
+2. **A genuinely surprising vendor-behavior finding, not a credforge
+   bug:** Alpha Vantage's `GLOBAL_QUOTE` endpoint does not check the
+   `apikey` value at all. Verified directly with curl --
+   `apikey=demo`, `apikey=xyz123bogusnotreal`, and `apikey=totallyinvalidkey123`
+   all returned real, live IBM/MSFT quote data with HTTP 200. Only a
+   *missing or misnamed* param produces the `{"Error Message": ...}`
+   body (still HTTP 200, never a 401/403). Rate-limiting responses
+   ("Please consider spreading out your free API requests...") appeared
+   for the same bogus key across rapid calls, confirming the throttle is
+   per-IP, not per-key -- Alpha Vantage's free tier has nothing that
+   authenticates this endpoint by key value. **This means "VALIDATE
+   passes" for Alpha Vantage confirms a real, correctly-shaped API
+   round-trip succeeded using the credential in its documented position
+   -- not that the vendor cryptographically checked this specific key.**
+   That's a materially weaker guarantee than NASA's validation (NASA's
+   `api_umbrella` does reject an unrecognized key with a real 401,
+   confirmed by the existing retry-then-succeed test shape) and is worth
+   saying explicitly rather than letting "validation passed" imply more
+   than it does for this one vendor.
+
+**No attempt made to patch around finding #2 generically** (e.g.
+sniffing response bodies for an "Error Message"-shaped envelope under a
+2xx status) -- that's a vendor-specific quirk-detector of exactly the
+kind D-031 already declined to build generically for signup-form
+selectors, for the same reason: it would be guessed heuristics against
+one vendor's JSON shape, not a general HTTP-semantics rule, and risks
+false positives on any other vendor whose legitimate payload happens to
+contain a key that looks error-like.
+
+**Verified live, full pipeline, fresh temp registry/vault (bypassing the
+idempotency guard, same as D-061):** `provision()` → `status="provisioned"`,
+`api_key_ref="vault://alphavantage.co/api_key"`; `validate()` →
+`status="valid"`, `http_status_code=200`,
+`checked_url="https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=IBM&apikey=***REDACTED***"`.
+GATE independently reached `AUTO` / `eligible_auto` first, unaffected by
+any of this. 253/253 tests pass (4 existing `validate.py` tests updated
+to reflect the new 3-variant query-param order -- `apikey`/`api_key`/header
+-- not to make them pass artificially; each updated assertion still
+encodes a real, verified vendor behavior, e.g. NASA's real 401 rejection
+of the `apikey` spelling).
+
+**Rejected: leaving `_api_key_check_variants` at two variants and only
+adding the recipe fallback.** Would have shipped a "fix" that happened to
+report `status="valid"` against Alpha Vantage for the wrong reason (any
+200 counts as valid) rather than for the right one (the correct param
+name was actually used) -- passing the stated acceptance test
+("validation passes with a real status code") while quietly still being
+broken. Verifying the user's own stated assumption ("that placement is
+already handled") before relying on it is what surfaced this.

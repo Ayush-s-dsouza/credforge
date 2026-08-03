@@ -126,6 +126,15 @@ ALPHA_VANTAGE = SignupRecipe(
     requires_email_verification=False,
     api_key_page_selector="body",
     api_key_page_regex=r"Your (?:dedicated access key|API key) is:\s*([A-Z0-9]{16})",
+    # D-063: DISCOVER's own extraction of validation_endpoint is real-LLM-
+    # non-deterministic -- the same live run that got a real key back
+    # skipped populating this field, so VALIDATE had nothing to call and
+    # returned validation_failed_unknown even though the credential itself
+    # was genuine. GLOBAL_QUOTE is documented, free-tier, and a GET (no
+    # side effects), matching VALIDATE's own GET-only rule (D-032). The
+    # key is passed as a query param, which validate.py already tries
+    # first for auth_scheme=api_key (D-044).
+    validation_endpoint_fallback="GET https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=IBM",
 )
 
 # ipinfo.io/signup -- first name, last name, email, password (a real

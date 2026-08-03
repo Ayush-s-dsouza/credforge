@@ -107,6 +107,17 @@ class SignupRecipe(BaseModel):
     api_key_email_regex: str | None = None
     email_subject_contains: str | None = None
 
+    # D-063: a known-good VALIDATE endpoint for this vendor, used ONLY as
+    # a fallback when DISCOVER's own extraction doesn't find one --
+    # exactly the same rule as identity pinning (D-048): the recipe
+    # supplies a fallback, it never overrides what DISCOVER actually
+    # found, and GATE's own verdict is completely untouched (this is
+    # consumed by the orchestrator's post-GATE VALIDATE call, nowhere
+    # near GATE's decision). A full absolute URL (e.g. "GET
+    # https://example.com/query?...") is safest -- it doesn't depend on
+    # DISCOVER also having found a correct base_url that same run.
+    validation_endpoint_fallback: str | None = None
+
 
 class PlaywrightBrowserDriver:
     def __init__(self, *, recipes: dict[str, SignupRecipe] | None = None) -> None:
