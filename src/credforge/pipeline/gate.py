@@ -38,13 +38,25 @@ to HITL, unlike DISCOVERY_FAILED. It's carried forward as a `completeness`
 gap list instead -- a missing field in prose is not something a human
 needs to unblock; see DECISIONS.md D-029.
 
-A requires_payment=True flag from either source is adjusted before it's
-used: payment language scoped to a specific endpoint or data tier ("this
-is a premium endpoint") is not the same claim as payment language scoped
-to API access itself ("API access requires a paid plan"), and only the
-extractor's raw flag doesn't distinguish them. Genuinely unscoped
-language still always blocks. See DECISIONS.md D-057 for the real false
-HITL this fixes.
+Four flags -- requires_payment, requires_business_verification,
+requires_sales_contact, requires_phone_verification -- are adjusted
+before use: language scoped to a specific endpoint, data tier, or usage
+class ("this is a premium endpoint", "for commercial use") is not the
+same claim as an unscoped statement that access itself requires it ("API
+access requires a paid plan"), and only the extractor's raw flag doesn't
+distinguish them. The check runs once per source, upstream of any
+individual flag -- not one override per flag -- because a real vendor
+page can trip more than one of these four from adjacent, identically-
+scoped clauses in the same sentence (D-058). prohibits_automation,
+requires_captcha, and requires_sso_only are never adjusted: those are
+structural facts about the signup mechanism itself, never legitimately
+scoped to a paid tier, and always block. A registered SignupRecipe is
+independent, out-of-band proof a vendor's free signup already works
+end to end (D-052/D-053) -- for a recipe-backed vendor specifically, a
+block from one of the four adjustable flags with no unscoped-access
+language present is treated as a structural false positive even if no
+keyword list happens to recognize the exact phrasing, logged loudly, not
+silently. See DECISIONS.md D-057/D-058.
 """
 
 from ..enums import ApiStyle, PipelineStage, ReasonCode, Status
@@ -89,40 +101,58 @@ def _completeness_gaps(extraction: DiscoveryExtraction, *, api_style: ApiStyle |
         and not (api_style == ApiStyle.GRAPHQL and field_name in _REST_ONLY_COMPLETENESS_FIELDS)
     ]
 
-# D-057: a real live case (Alpha Vantage) showed the extractor's raw
-# requires_payment flag doesn't distinguish payment language SCOPED to a
-# specific endpoint/data-tier from UNSCOPED language stating API access
-# itself requires payment -- "This is a premium endpoint... please
-# subscribe to a premium membership plan" describes ONE realtime/
-# historical-data endpoint, not the free API key credforge actually
-# acquires, but the extractor flagged requires_payment=True from it alone
-# and GATE blocked PROVISION on a vendor with a real, working free tier.
+# D-058 (generalizes D-057 from requires_payment alone to every flag that
+# can legitimately be phrased in a scope-qualified way). Found live: the
+# same Alpha Vantage sentence that produced a false requires_payment also
+# produces a false requires_sales_contact once requires_payment alone was
+# fixed -- "For commercial use, please contact sales" is the very next
+# clause, scoped to commercial use the same way. Whack-a-mole per flag
+# doesn't converge, so this check runs ONCE per signal source, upstream of
+# any individual flag, not as N separate per-flag overrides.
 #
+# Only these four flags are ever adjusted -- prohibits_automation,
+# requires_captcha, and requires_sso_only are deliberately excluded.
+# Those three are structural facts about the signup mechanism itself (a
+# form either has a CAPTCHA or doesn't; login is either SSO-only or
+# isn't; automation is either prohibited or isn't) -- never legitimately
+# "true only for a paid tier" the way a payment/business/sales/phone
+# requirement genuinely can be. Generalizing scope-suppression to them
+# was considered and rejected; see DECISIONS.md D-058.
+_SCOPE_SUPPRESSIBLE_FLAGS: tuple[str, ...] = (
+    "requires_payment",
+    "requires_business_verification",
+    "requires_sales_contact",
+    "requires_phone_verification",
+)
+
 # Interpretation of "must not trigger on its own" (deliberately explicit,
-# since the spec allows more than one reading): scoped language ALONE is
-# sufficient to suppress -- it does not additionally require free-tier
+# since the spec allows more than one reading): a scope qualifier ALONE
+# is sufficient to suppress -- it does not additionally require free-tier
 # evidence to also be present. FREE-TIER OVERRIDE is a second, independent
-# path to the same suppression (covers a page whose payment language
-# doesn't literally match a SCOPED marker but where free-tier evidence is
-# still present) rather than a precondition layered on top of SCOPED.
-# UNSCOPED language always wins over both, checked first, regardless of
-# scoped or free-tier language appearing elsewhere on the very same page --
-# a vendor that mentions a free tier AND separately states API access
-# itself requires a paid plan is a real, mixed-tier vendor that still
-# needs a human, not something this override should silently clear.
-_SCOPED_PAYMENT_MARKERS = (
+# path to the same suppression (covers a page whose blocking language
+# doesn't literally match a scope-qualifier marker but where free-tier
+# evidence is still present), not a precondition layered on top of it.
+# UNSCOPED_ACCESS language always wins over both, checked first,
+# regardless of scoped or free-tier language appearing elsewhere on the
+# very same page -- a vendor that mentions a free tier AND separately
+# states access itself requires payment/verification/a sales call is a
+# real, mixed-tier vendor that still needs a human.
+_SCOPE_QUALIFIER_MARKERS = (
     "this is a premium endpoint",
     "premium endpoint",
+    "this endpoint",
     "this endpoint requires",
+    "for commercial use",
     "realtime data",
     "historical data",
     "intraday data",
     "delayed data",
-    "for commercial use",
+    "for higher limits",
+    "enterprise customers",
     "premium membership plan",
     "upgrade to access",
 )
-_UNSCOPED_PAYMENT_MARKERS = (
+_UNSCOPED_ACCESS_MARKERS = (
     "api access requires a paid plan",
     "you must subscribe to use the api",
     "no free tier",
@@ -138,30 +168,73 @@ _FREE_TIER_OVERRIDE_MARKERS = (
 )
 
 
-def _payment_signal_is_false_positive(source_text: str, *, developer_portal_url: str | None) -> bool:
-    """True when a requires_payment=True flag from this source should be
-    treated as a false positive rather than a real block. See the module-
-    level comment above _SCOPED_PAYMENT_MARKERS for the precedence this
-    implements, and DECISIONS.md D-057 for the real case that motivated it."""
-    lower = source_text.lower()
-    if any(marker in lower for marker in _UNSCOPED_PAYMENT_MARKERS):
-        return False
+def _adjust_for_scoped_gate_signals(
+    signals: TosGateExtraction,
+    *,
+    source_text: str,
+    developer_portal_url: str | None,
+    is_recipe_backed: bool,
+    identity_key: str,
+    label: str,
+    explain: ExplainSink,
+) -> TosGateExtraction:
+    """Suppresses any of _SCOPE_SUPPRESSIBLE_FLAGS this source flagged
+    True, when that's explained by scope-qualified language rather than a
+    genuine unscoped access requirement. Checked once, against the whole
+    source text, upstream of the individual flags. See DECISIONS.md D-058
+    for the real case (and the D-057 case it generalizes) this exists to
+    fix, and the module docstring for why prohibits_automation/
+    requires_captcha/requires_sso_only are never touched here."""
+    active = [flag for flag in _SCOPE_SUPPRESSIBLE_FLAGS if getattr(signals, flag)]
+    if not active:
+        return signals
 
-    scoped_hit = any(marker in lower for marker in _SCOPED_PAYMENT_MARKERS)
-    free_tier_hit = any(marker in lower for marker in _FREE_TIER_OVERRIDE_MARKERS) or (
+    lower = source_text.lower()
+    if any(marker in lower for marker in _UNSCOPED_ACCESS_MARKERS):
+        return signals  # a real, unscoped block -- never suppressed, recipe-backed or not
+
+    scoped = any(marker in lower for marker in _SCOPE_QUALIFIER_MARKERS)
+    free_tier = any(marker in lower for marker in _FREE_TIER_OVERRIDE_MARKERS) or (
         developer_portal_url is not None and "api-key" in developer_portal_url.lower()
     )
-    return scoped_hit or free_tier_hit
 
+    if scoped or free_tier:
+        explain.emit(
+            ExplainEvent(
+                stage=PipelineStage.GATE,
+                identity_key=identity_key,
+                message=(
+                    f"D-058: suppressing scope-qualified signal(s) from {label}: {', '.join(active)} "
+                    f"(scope_qualifier={scoped}, free_tier_evidence={free_tier})"
+                ),
+            )
+        )
+        return signals.model_copy(update={flag: False for flag in active})
 
-def _adjust_for_scoped_payment_language(
-    signals: TosGateExtraction, *, source_text: str, developer_portal_url: str | None
-) -> TosGateExtraction:
-    if not signals.requires_payment:
-        return signals
-    if not _payment_signal_is_false_positive(source_text, developer_portal_url=developer_portal_url):
-        return signals
-    return signals.model_copy(update={"requires_payment": False})
+    if is_recipe_backed:
+        # D-058 structural guard: no keyword in either list happens to
+        # match this particular phrasing, but a registered SignupRecipe
+        # is independent, out-of-band proof this vendor's free signup
+        # already works end to end -- and no unscoped-access language was
+        # found above. A block from a scope-suppressible flag alone, on a
+        # vendor we've already proven signs up for free, is a structural
+        # false positive by construction, not a judgment call the keyword
+        # lists need to have anticipated.
+        explain.emit(
+            ExplainEvent(
+                stage=PipelineStage.GATE,
+                identity_key=identity_key,
+                message=(
+                    f"D-058 STRUCTURAL FALSE POSITIVE: {label} flagged {', '.join(active)} with no "
+                    "unscoped-access language and no recognized scope-qualifier or free-tier marker -- "
+                    "suppressing anyway because a registered SignupRecipe already proves this vendor's "
+                    "free signup works end to end"
+                ),
+            )
+        )
+        return signals.model_copy(update={flag: False for flag in active})
+
+    return signals  # not explained by anything this override recognizes, and no structural proof either
 
 
 _TOS_URL_GUESSES = (
@@ -313,18 +386,29 @@ async def gate(
     # See DECISIONS.md D-040.
     signal_sources: list[_SignalSource] = []
 
-    # D-057: the developer_portal_url extractors like AnthropicExtractor
+    # D-057/D-058: the developer_portal_url extractors like AnthropicExtractor
     # report is real signal too (Alpha Vantage's own is literally the
     # free-key signup page) -- available regardless of which source's
-    # signals are being adjusted.
+    # signals are being adjusted. Lazy import, same pattern RESOLVE
+    # already uses for this same registry (D-048) -- avoids a hard
+    # top-level dependency from GATE on PROVISION's recipe registry.
+    from ..providers.signup_recipes import LIVE_SIGNUP_RECIPES
+
     developer_portal_url = discovery.extraction.developer_portal_url if discovery.extraction else None
+    is_recipe_backed = identity_key in LIVE_SIGNUP_RECIPES
 
     if discovery.docs_text and discovery.docs_url:
         docs_signals = await extractor.extract_tos_gate_signals(
             tos_text=discovery.docs_text, tos_url=discovery.docs_url
         )
-        docs_signals = _adjust_for_scoped_payment_language(
-            docs_signals, source_text=discovery.docs_text, developer_portal_url=developer_portal_url
+        docs_signals = _adjust_for_scoped_gate_signals(
+            docs_signals,
+            source_text=discovery.docs_text,
+            developer_portal_url=developer_portal_url,
+            is_recipe_backed=is_recipe_backed,
+            identity_key=identity_key,
+            label="developer docs",
+            explain=explain,
         )
         signal_sources.append(("developer docs", discovery.docs_url, docs_signals))
 
@@ -332,8 +416,14 @@ async def gate(
     if tos_found is not None:
         tos_url, tos_text = tos_found
         tos_signals = await extractor.extract_tos_gate_signals(tos_text=tos_text, tos_url=tos_url)
-        tos_signals = _adjust_for_scoped_payment_language(
-            tos_signals, source_text=tos_text, developer_portal_url=developer_portal_url
+        tos_signals = _adjust_for_scoped_gate_signals(
+            tos_signals,
+            source_text=tos_text,
+            developer_portal_url=developer_portal_url,
+            is_recipe_backed=is_recipe_backed,
+            identity_key=identity_key,
+            label="Terms of Service",
+            explain=explain,
         )
         signal_sources.append(("Terms of Service", tos_url, tos_signals))
     else:

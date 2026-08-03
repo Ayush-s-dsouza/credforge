@@ -544,6 +544,198 @@ async def test_open_meteo_shaped_unscoped_payment_requirement_still_fires() -> N
     assert result.reason_code == ReasonCode.REQUIRES_PAYMENT
 
 
+# --- D-058: scope suppression generalized to every scope-suppressible flag -
+
+_ALPHA_VANTAGE_FULL_TEXT = (
+    "This is a premium endpoint. If you would like to access realtime, 15-minute delayed, "
+    "and/or historical intraday data, please subscribe to a premium membership plan for your "
+    "personal use. For commercial use, please contact sales. "
+    "Get your free API key today to get started with our standard endpoints."
+)
+_ALPHA_VANTAGE_DEV_PORTAL_URL = "https://www.alphavantage.co/support/#api-key"
+
+
+@pytest.mark.asyncio
+async def test_scoped_sales_contact_language_does_not_trigger_requires_sales_contact() -> None:
+    # The exact reported bug: once requires_payment alone was fixed (D-057),
+    # the very next clause in the same real sentence -- "For commercial
+    # use, please contact sales" -- tripped requires_sales_contact instead.
+    # Same scope qualifier ("for commercial use"), different flag.
+    discovery = DiscoveryResult(
+        reason_code=None, docs_url="https://docs.example.com",
+        extraction=DiscoveryExtraction(has_public_api=True, developer_portal_url=_ALPHA_VANTAGE_DEV_PORTAL_URL),
+    )
+    text = _ALPHA_VANTAGE_FULL_TEXT + " These are the terms of service governing use of this API. " * 3
+    fetch = FakeFetchProvider({"https://example.com/terms": _ok(text)})
+    extractor = FakeExtractor(
+        _clean_tos().model_copy(
+            update={"requires_sales_contact": True, "evidence_snippets": ["For commercial use, please contact sales."]}
+        )
+    )
+
+    result = await gate("example.com", discovery=discovery, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor)
+
+    assert result.status == Status.AUTO
+
+
+@pytest.mark.asyncio
+async def test_structural_guard_suppresses_unrecognized_scoped_phrasing_for_a_recipe_backed_vendor() -> None:
+    # Neither a SCOPE_QUALIFIER nor a FREE_TIER marker literally appears --
+    # this text is deliberately phrased so no keyword list recognizes it.
+    # alphavantage.co is a real, registered SignupRecipe (D-052/D-053: a
+    # real credential acquired live, out-of-band proof the free signup
+    # flow works) -- the structural guard must suppress anyway.
+    text = (
+        "Business customers wishing to integrate at scale should reach out to discuss options. "
+        "These are the terms of service governing use of this API. " * 3
+    )
+    fetch = FakeFetchProvider({"https://alphavantage.co/terms": _ok(text)})
+    extractor = FakeExtractor(
+        _clean_tos().model_copy(
+            update={"requires_business_verification": True, "evidence_snippets": ["reach out to discuss options"]}
+        )
+    )
+    discovery = DiscoveryResult(
+        reason_code=None, docs_url="https://docs.alphavantage.co",
+        extraction=DiscoveryExtraction(has_public_api=True),  # no developer_portal_url -- proves the guard doesn't need it
+    )
+
+    result = await gate("alphavantage.co", discovery=discovery, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor)
+
+    assert result.status == Status.AUTO
+
+
+@pytest.mark.asyncio
+async def test_structural_guard_does_not_apply_to_a_non_recipe_backed_vendor() -> None:
+    # Identical unrecognized phrasing to the test above, but this domain
+    # has no registered SignupRecipe -- no out-of-band proof exists, so
+    # the block must stand. Proves the structural guard is actually
+    # conditioned on recipe-backing, not a blanket keyword-miss pass.
+    text = (
+        "Business customers wishing to integrate at scale should reach out to discuss options. "
+        "These are the terms of service governing use of this API. " * 3
+    )
+    fetch = FakeFetchProvider({"https://example.com/terms": _ok(text)})
+    extractor = FakeExtractor(
+        _clean_tos().model_copy(
+            update={"requires_business_verification": True, "evidence_snippets": ["reach out to discuss options"]}
+        )
+    )
+
+    result = await gate("example.com", discovery=DISCOVERED_OK, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor)
+
+    assert result.status == Status.HITL
+    assert result.reason_code == ReasonCode.REQUIRES_BUSINESS_VERIFICATION
+
+
+@pytest.mark.asyncio
+async def test_structural_guard_does_not_override_genuinely_unscoped_language_for_a_recipe_backed_vendor() -> None:
+    # Even for a proven, recipe-backed vendor, real unscoped-access
+    # language must still block -- the structural guard only covers the
+    # "no keyword recognized, no unscoped language present" gap, never a
+    # genuine unscoped statement. (Hypothetical for alphavantage.co --
+    # the real vendor has no such language -- but the code must not treat
+    # recipe-backing as a blanket override.)
+    text = (
+        "A paid account is required to obtain an API key. "
+        "These are the terms of service governing use of this API. " * 3
+    )
+    fetch = FakeFetchProvider({"https://alphavantage.co/terms": _ok(text)})
+    extractor = FakeExtractor(
+        _clean_tos().model_copy(update={"requires_payment": True, "evidence_snippets": [text]})
+    )
+
+    result = await gate("alphavantage.co", discovery=DISCOVERED_OK, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor)
+
+    assert result.status == Status.HITL
+    assert result.reason_code == ReasonCode.REQUIRES_PAYMENT
+
+
+@pytest.mark.asyncio
+async def test_alpha_vantage_real_shape_flags_are_suppressed_but_no_tos_page_means_still_not_auto() -> None:
+    # End-to-end regression for the actual reported case: the full real
+    # sentence (both the premium-endpoint/payment clause AND the
+    # commercial-use/sales-contact clause DISCOVER's crawl would return
+    # together) on the real recipe-backed domain, with no dedicated ToS
+    # page findable (matching the real live run -- Alpha Vantage has none
+    # of the guessed paths). Must reach AUTO, not stall on either flag.
+    discovery = DiscoveryResult(
+        reason_code=None, docs_url="https://www.alphavantage.co/documentation/",
+        docs_text=_ALPHA_VANTAGE_FULL_TEXT,
+        extraction=DiscoveryExtraction(
+            has_public_api=True, base_url="https://www.alphavantage.co/query",
+            developer_portal_url=_ALPHA_VANTAGE_DEV_PORTAL_URL,
+        ),
+    )
+    fetch = FakeFetchProvider({})  # no dedicated ToS page reachable, matching the real live run
+    extractor = FakeExtractor(
+        _clean_tos().model_copy(
+            update={
+                "requires_payment": True,
+                "requires_sales_contact": True,
+                "evidence_snippets": [
+                    "This is a premium endpoint.",
+                    "For commercial use, please contact sales.",
+                ],
+            }
+        )
+    )
+
+    result = await gate(
+        "alphavantage.co", discovery=discovery, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor
+    )
+
+    # Honest, not AUTO: with no dedicated ToS page reachable under any of
+    # GATE's guessed paths (matching the real live run's own log line,
+    # "could not locate a dedicated ToS/developer-agreement page"),
+    # TOS_UNVERIFIABLE still fires -- D-021's principle that a clean
+    # docs-page scan alone is never sufficient evidence of a clean ToS is
+    # untouched by D-058. What D-058 actually proves here: neither flag
+    # is what's blocking it anymore.
+    assert result.status == Status.HITL
+    assert result.reason_code == ReasonCode.TOS_UNVERIFIABLE
+    assert result.reason_code != ReasonCode.REQUIRES_PAYMENT
+    assert result.reason_code != ReasonCode.REQUIRES_SALES_CONTACT
+
+
+@pytest.mark.asyncio
+async def test_alpha_vantage_shape_reaches_auto_when_a_tos_page_is_findable() -> None:
+    # The genuine end-to-end proof the fix is complete: identical scoped
+    # payment/sales-contact signals, on the real recipe-backed domain, but
+    # with a real, clean, findable dedicated ToS page (unlike Alpha
+    # Vantage's actual one, which the test above shows GATE can't find at
+    # all -- a separate, pre-existing gap, not something D-058 touches).
+    discovery = DiscoveryResult(
+        reason_code=None, docs_url="https://www.alphavantage.co/documentation/",
+        docs_text=_ALPHA_VANTAGE_FULL_TEXT,
+        extraction=DiscoveryExtraction(
+            has_public_api=True, base_url="https://www.alphavantage.co/query",
+            developer_portal_url=_ALPHA_VANTAGE_DEV_PORTAL_URL,
+        ),
+    )
+    clean_tos_text = "These are the terms of service. Standard use is unrestricted. " * 4
+    fetch = FakeFetchProvider({"https://alphavantage.co/terms": _ok(clean_tos_text)})
+    extractor = PerUrlExtractor(
+        {
+            "https://www.alphavantage.co/documentation/": _clean_tos().model_copy(
+                update={
+                    "requires_payment": True,
+                    "requires_sales_contact": True,
+                    "evidence_snippets": ["This is a premium endpoint.", "please contact sales"],
+                }
+            ),
+            "https://alphavantage.co/terms": _clean_tos(),
+        }
+    )
+
+    result = await gate(
+        "alphavantage.co", discovery=discovery, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor
+    )
+
+    assert result.status == Status.AUTO
+    assert result.reason_code == ReasonCode.ELIGIBLE_AUTO
+
+
 @pytest.mark.asyncio
 async def test_completeness_gaps_are_still_carried_on_a_hitl_result() -> None:
     incomplete_discovery = DiscoveryResult(

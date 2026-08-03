@@ -2954,3 +2954,97 @@ guards: an Etsy-shaped unscoped automation prohibition and an
 Open-Meteo-shaped unscoped payment requirement both still produce their
 real, correct HITL verdicts -- this fix cannot silently clear a genuine
 block. 236/236 tests pass including all of the above.
+
+### D-058: D-057 generalized from `requires_payment` alone to every scope-suppressible flag, plus a structural guard for recipe-backed vendors
+
+**Whack-a-mole, immediately, on the very next live run.** Re-running
+Alpha Vantage after D-057, `requires_payment` no longer fired -- but GATE
+blocked on `requires_sales_contact` instead, from the *very next clause*
+in the *same real sentence*: *"This is a premium endpoint... please
+subscribe to a premium membership plan for your personal use. **For
+commercial use, please contact sales.**"* Same scope qualifier ("for
+commercial use"), different flag. Fixing flags one at a time as each
+false positive surfaces doesn't converge -- it just moves the bug to
+whichever adjacent flag the same scoped clause happens to also trip.
+
+**Fixed two ways, deliberately layered:**
+
+1. **The scoped/unscoped check moved upstream of individual flags.**
+   `_adjust_for_scoped_gate_signals()` replaces D-057's
+   payment-only `_adjust_for_scoped_payment_language()`: it runs *once*
+   per signal source, against that source's whole raw text, and clears
+   *every* one of four flags the extractor found true --
+   `requires_payment`, `requires_business_verification`,
+   `requires_sales_contact`, `requires_phone_verification` -- if the text
+   is explained by a scope qualifier or free-tier evidence and no
+   unscoped-access language is present. One check, N flags, not N
+   checks. `prohibits_automation`, `requires_captcha`, and
+   `requires_sso_only` are deliberately excluded from this list --
+   argued and rejected below.
+2. **A structural guard for recipe-backed vendors (the real safety net
+   against the *next* differently-worded clause).** A registered
+   `SignupRecipe` is independent, out-of-band proof this vendor's free
+   signup flow already works end to end (D-052/D-053: a real Alpha
+   Vantage key acquired live in 5.59s, two days before this bug was
+   found). For a recipe-backed vendor specifically, if a
+   scope-suppressible flag blocks with *no* recognized scope-qualifier
+   or free-tier marker *and no unscoped-access language either*, that's
+   treated as a structural false positive and suppressed anyway --
+   logged loudly (`D-058 STRUCTURAL FALSE POSITIVE` in the explain
+   stream), not silently. This is what actually "stops the whack-a-mole"
+   for these four vendors: the next unanticipated phrasing of the same
+   scoped-commercial-tier idea doesn't need its own keyword added first.
+
+**Why `prohibits_automation`/`requires_captcha`/`requires_sso_only` are
+excluded, considered and rejected as candidates for the same treatment:**
+these three are structural facts about the signup *mechanism* itself, not
+claims about a pricing or usage tier. A signup form either has a CAPTCHA
+widget or it doesn't; login is either SSO-only or it isn't; automated
+account creation is either prohibited or it isn't -- none of these are
+coherently "true only for commercial/premium use." A vendor cannot have a
+CAPTCHA that only appears for paid customers and call that "scoped"
+payment language; the CAPTCHA is either on the signup form credforge
+actually has to submit, or it isn't. Generalizing scope-suppression to
+them would mean actively working around exactly the class of real,
+structural, principled-to-respect blocks D-046/OpenWeatherMap already
+established this project won't try to defeat.
+
+**A real, honest limit this generalization exposed, not fixed:** with
+*both* flags correctly suppressed, Alpha Vantage's real live run still
+does not reach `AUTO` -- it lands on `TOS_UNVERIFIABLE`. GATE never finds
+a dedicated ToS page under any of its guessed paths for this vendor
+(`could not locate a dedicated ToS/developer-agreement page`, confirmed
+in the live run's own explain log), and D-021's principle -- a clean
+docs-page scan is never sufficient evidence of a clean ToS on its own --
+is untouched by this fix, correctly. This is a *separate*, pre-existing
+gap (GATE's `_TOS_URL_GUESSES` list not including whatever path, if any,
+Alpha Vantage's real ToS actually lives at) that D-058 did not touch and
+was not asked to fix. Documented honestly rather than quietly patched in
+under the same commit: see the live-verification report for the exact
+outcome and OPS.md/README.md for whether this is worth a dedicated fix.
+
+**Rejected: extending the structural guard to `TOS_UNVERIFIABLE`
+itself** (i.e., a recipe-backed vendor with no blocking flags and no
+findable ToS page clears to `AUTO` anyway). Tempting, since it would have
+gotten Alpha Vantage to `AUTO` in this same pass -- but `TOS_UNVERIFIABLE`
+is not a scope-suppressible flag's false positive, it's GATE genuinely
+never having read *any* ToS text at all. "We already know this vendor's
+signup form works" is not evidence about what its ToS says, and treating
+recipe-backing as license to skip GATE's ToS check entirely would
+contradict D-048's own explicit rule that a recipe pins identity only,
+never the GATE verdict, and GATE must "still evaluate independently."
+Not attempted here; would need its own decision, not inherited from this
+one.
+
+**Verified:** `tests/pipeline/test_gate.py` -- the reported
+`requires_sales_contact` case is fixed directly; the structural guard
+suppresses an unrecognized phrasing for `alphavantage.co` specifically
+and is proven *not* to apply to an otherwise-identical non-recipe-backed
+domain (a real negative test, not just the positive case); the guard is
+proven not to override genuine unscoped-access language even for a
+recipe-backed vendor; the Etsy and Open-Meteo regression guards from
+D-057 still pass unchanged. Two Alpha Vantage end-to-end tests, not one:
+the real shape (no findable ToS page) honestly asserts
+`TOS_UNVERIFIABLE`, not `AUTO`; a second, otherwise-identical case with a
+findable clean ToS page asserts the flag-suppression mechanism itself
+does reach `AUTO` when nothing else is in the way. 242/242 tests pass.
