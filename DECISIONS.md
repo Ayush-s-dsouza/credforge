@@ -3238,3 +3238,77 @@ reaches `FetchResult.text`; the existing size cap still rejects an
 oversized PDF before any bytes are streamed, unchanged from D-030; a
 corrupted PDF body raises the new typed `pdf_decode_error`, not an
 unhandled `pypdf` exception. 253/253 tests pass.
+
+### D-061: A plausible hypothesis (vendor-side dedupe) tested directly and found false -- the real cause was a stale extraction regex, one word different
+
+**The premise going in:** after D-057 through D-060 cleared every GATE
+block, Alpha Vantage's PROVISION step still failed extraction
+(`api_key_page_regex did not match the page content`). The most obvious
+explanation -- the same plus-addressed email alias (`alias_for()` is
+stable per identity_key) had already been used against this vendor
+several times this session, so maybe Alpha Vantage's own system was
+refusing to issue a second key to an email it already recognized, and
+showing a "you already have a key" page instead of a fresh one. Ephemeral
+Railway storage means credforge's own registry guard (`provision()`'s
+`find_open_provision` idempotency check) can't ever observe this --
+every deployed container starts with an empty registry, so it would
+retry the real vendor signup fresh every time regardless of what the
+vendor itself remembers about that email.
+
+**Tested directly, not assumed:** attached a Playwright response listener
+to the real signup submission (the *actual* network response, not a
+guess at page text) using the exact same reused alias. The real response
+from `POST https://www.alphavantage.co/create_post/` was:
+
+```json
+{"result": "Create post successful!", "text": "Welcome to Alpha Vantage! Your API key is: IE5ONPJ8S23PVPGA. Please record this API key at a safe place for future data access."}
+```
+
+A brand-new, real, valid key -- issued on a repeat submission with an
+email already used multiple times this session. **There is no observed
+vendor-side dedupe.** The actual cause was simpler and less interesting:
+Alpha Vantage's success copy changed from *"Your dedicated access key
+is: X"* (the wording the recipe's regex was written against, and the
+wording a real key earlier this session actually used) to *"Your API
+key is: X"* -- a one-word copy change on the vendor's side, sometime
+between then and now, that the old regex simply didn't match. Ordinary
+selector/regex drift -- exactly the class of risk already named, before
+this incident, in README's "What I'd build next" (selector-drift
+detection) -- not a new phenomenon and not vendor-side idempotency.
+
+**Decided, given the tested-false premise:** no `ALREADY_PROVISIONED_AT_VENDOR`
+outcome, no dedupe-detection code. Building a detector for wording that
+was directly checked and does not appear would be speculative code with
+no real backing -- exactly what this project's evidentiary standard
+exists to prevent. Instead: `ALPHA_VANTAGE.api_key_page_regex` now
+matches *either* observed real wording --
+`r"Your (?:dedicated access key|API key) is:\s*([A-Z0-9]{16})"` -- since
+both are independently confirmed real (at different points this
+session), not just the newest one, in case the vendor is inconsistent
+or reverts. Re-verified live with a fresh registry (bypassing the local
+idempotency guard, matching how the real ephemeral Railway deployment
+always starts): `provision()` → `status="provisioned"`, `validate()` →
+`status="valid"`, HTTP 200, ~7.7s total, real key vaulted and validated.
+Alpha Vantage is now the first vendor in this project to go from app
+name to a live-acquired, live-validated credential through a real
+`--live` deployment run *and* clear every GATE check for real, not
+mocked -- NASA's earlier live credential (D-052/D-053) predates the
+tier-contradiction and GATE-scoping fixes this chain of work (D-057
+through D-060) exists to correct.
+
+**Rejected: leaving the regex matching only the newest wording.** Both
+phrasings are independently, separately confirmed real from this same
+vendor at different points -- narrowing to just the latest one repeats
+the exact mistake (assuming a vendor's copy is stable) that caused this
+incident in the first place.
+
+**Verified:** the fix is the regex change itself, verified against a
+real captured network response (not a synthetic fixture) and a real,
+fresh, live `provision()` + `validate()` run. No new automated test was
+added for this specific regex string (a live vendor's exact copy isn't
+something a unit test can pin without becoming exactly the kind of
+brittle, guessed fixture this investigation just warned against); the
+existing `PlaywrightBrowserDriver` regex-matching tests
+(`test_recipe_with_no_extraction_mechanism_fails_instead_of_reporting_empty_success`
+and the extraction-branch logic it exercises) are unaffected. 253/253
+tests pass.

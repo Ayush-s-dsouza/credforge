@@ -74,14 +74,17 @@ here; real under the CLI's <code>--live</code>) provision + validate a credentia
      acquisition is real only for vendors with a registered signup recipe -- the banner above the
      log states which scope applies, every run, never silently.</p>
 
-  <h3 style="margin-bottom:4px;">Live credential acquisition</h3>
-  <p style="font-size:.85em;opacity:.7;margin-top:0;">Real signup, real credential, validated with a
-     real API call. Only the vendors below have a registered signup recipe.</p>
+  <h3 style="margin-bottom:4px;">Registered signup recipes</h3>
+  <p style="font-size:.85em;opacity:.7;margin-top:0;">These four have recipes. One reaches a real,
+     validated credential end to end; the other three are each blocked at a different, diagnosed
+     point -- that's the finding, shown next to each button below, not hidden until you click.</p>
   <div class="examples-row" id="live-buttons-row"></div>
+  <p style="font-size:.85em;opacity:.7;">The static NASA artifact above is the one credential this
+     project has that <strong>persists</strong> -- acquired, vaulted, and validated in an earlier run.</p>
   <p class="warn" style="font-size:.85em;">Railway's filesystem is ephemeral: a credential acquired by a live
      run here is real (vaulted, then validated with a real API call) but lives only in this container's
      disk. It's shown to you in this session and then gone -- it does <strong>not</strong> persist across a
-     redeploy or restart. The one credential meant to persist is the static NASA example above.</p>
+     redeploy or restart.</p>
 
   <h3 style="margin:20px 0 4px;">Research + gating -- try any app</h3>
   <p style="font-size:.85em;opacity:.7;margin-top:0;">Runs identification, docs discovery, auth
@@ -122,11 +125,21 @@ async function loadStatus() {
   const row = document.getElementById('live-buttons-row');
   if (s.live_enabled && s.live_recipe_vendors && s.live_recipe_vendors.length) {
     for (const v of s.live_recipe_vendors) {
+      const wrap = document.createElement('span');
+      wrap.style.display = 'inline-flex';
+      wrap.style.alignItems = 'center';
+      wrap.style.gap = '6px';
       const btn = document.createElement('button');
       btn.textContent = v.label;
       btn.title = `passes "${v.domain}" as input -- the real registrable domain, to give RESOLVE its best shot`;
       btn.onclick = () => setApp(v.domain);
-      row.appendChild(btn);
+      const note = document.createElement('span');
+      note.style.opacity = '0.7';
+      note.style.fontSize = '.85em';
+      note.textContent = `— ${v.outcome_note}`;
+      wrap.appendChild(btn);
+      wrap.appendChild(note);
+      row.appendChild(wrap);
     }
   } else {
     const note = document.createElement('span');

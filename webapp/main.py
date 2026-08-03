@@ -59,6 +59,23 @@ _RECIPE_DISPLAY_NAMES = {
     "ipinfo.io": "IPinfo",
 }
 
+# What actually happens for each, as of the last real live verification --
+# not aspirational copy. Alpha Vantage is the one of these four that goes
+# all the way through: GATE reaches AUTO (D-057/D-058/D-059/D-060 fixed a
+# real chain of false blocks -- scoped payment/sales-contact language, a
+# missed ToS URL, an unreadable PDF ToS) and PROVISION+VALIDATE now
+# succeed for real (D-061 fixed a stale extraction regex that had looked
+# like vendor-side dedupe but wasn't -- confirmed false via a captured
+# real network response before writing any dedupe-detection code). The
+# other three are each blocked at a different, diagnosed point -- see
+# OPS.md's recipe-ability section for the real evidence behind each.
+_RECIPE_OUTCOME_NOTES = {
+    "alphavantage.co": "reaches AUTO, credential acquired and validated",
+    "nasa.gov": "JS-rendered docs, stops at discovery",
+    "ipinfo.io": "CAPTCHA",
+    "openweathermap.org": "CAPTCHA",
+}
+
 
 # Set at deploy time (`scripts/deploy_railway.sh`), not baked in by Railway
 # itself -- this service has no GitHub connection (repoTriggers is empty,
@@ -189,7 +206,11 @@ def status() -> dict:
         "live_runs_remaining": max(0, LIVE_RUN_CAP - _read_json_counter(LIVE_COUNTER_PATH)),
         "live_enabled": _live_enabled,
         "live_recipe_vendors": [
-            {"label": _RECIPE_DISPLAY_NAMES.get(domain, domain), "domain": domain}
+            {
+                "label": _RECIPE_DISPLAY_NAMES.get(domain, domain),
+                "domain": domain,
+                "outcome_note": _RECIPE_OUTCOME_NOTES.get(domain, "outcome not yet characterized"),
+            }
             for domain in sorted(LIVE_SIGNUP_RECIPES)
         ],
         "search_provider": "brave" if settings.brave_api_key else "ddg",

@@ -94,20 +94,29 @@ OPENWEATHERMAP = SignupRecipe(
 # (select, left at its default "Investor" -- not marked required in the
 # real DOM) + email. No password, no account, no CAPTCHA (confirmed by
 # real DOM/iframe/script inspection). The key appears on the *same page*
-# via AJAX a few hundred ms after submit, in prose ("Welcome to Alpha
-# Vantage! Your dedicated access key is: <16 uppercase alphanumeric
-# chars>. Please record..."), not in an isolable container found by
-# inspection -- hence
+# via AJAX a few hundred ms after submit, in prose -- hence
 # `api_key_page_selector="body"` + a regex, not a narrow selector.
 # `requires_email_verification=False` because this genuinely has no email
 # step at all -- confirmed live: the AJAX response arrives whether or not
-# the address is real, deliverable, or ever checked.
+# the address is real, deliverable, or ever checked, and re-submitting
+# the same email repeatedly issues a genuine new key every time -- no
+# observed vendor-side dedupe at all (see the extraction-failure incident
+# below, which looked like dedupe but wasn't).
 #
 # Real, rendered DOM (id="post-form"):
 #   <select name="occupation" id="occupation-text">...</select>
 #   <input type="text" name="organization" id="organization-text" required>
 #   <input type="text" name="email" id="email-text" required maxlength="254">
 #   <input id="submit-btn" type="submit" value="Get Free API Key">
+#
+# The success copy is not stable -- confirmed real, both observed live:
+# "Your dedicated access key is: X" (original) and, later the same
+# session, "Your API key is: X" for the identical flow, no code or field
+# changes on credforge's side. The regex matches either. See DECISIONS.md
+# D-061: this was first mistaken for vendor-side dedupe (a real key was
+# still being issued, just under wording the old regex didn't recognize)
+# -- verified false via a captured real network response before writing
+# any dedupe-detection code, not assumed.
 ALPHA_VANTAGE = SignupRecipe(
     email_field_selector="#email-text",
     app_name_field_selector="#organization-text",  # repurposed: no dedicated "organization" field exists on SignupRecipe
@@ -116,7 +125,7 @@ ALPHA_VANTAGE = SignupRecipe(
     docs_url="https://www.alphavantage.co/documentation/",
     requires_email_verification=False,
     api_key_page_selector="body",
-    api_key_page_regex=r"Your dedicated access key is:\s*([A-Z0-9]{16})",
+    api_key_page_regex=r"Your (?:dedicated access key|API key) is:\s*([A-Z0-9]{16})",
 )
 
 # ipinfo.io/signup -- first name, last name, email, password (a real
