@@ -765,13 +765,58 @@ def test_extract_tos_candidate_links_matches_href_and_text_keywords_and_resolves
     <a href="javascript:void(0)">Cookie settings</a>
     <a href="#section-2">Jump to section 2</a>
     """
-    links = _extract_tos_candidate_links(html, base_url="https://example.com/docs")
+    links = _extract_tos_candidate_links(html, base_url="https://example.com/docs", vendor_domain="example.com")
 
     assert "https://example.com/legal/privacy" in links
     assert "https://example.com/help" in links  # matched on visible text, not href
-    assert "https://other.example.com/tos" in links  # absolute href passed through as-is
+    assert "https://other.example.com/tos" in links  # a subdomain of the same registrable domain -- still the vendor
     assert not any("mailto:" in link for link in links)
     assert not any(link.startswith(("javascript:", "https://example.com/docs#")) for link in links)
+
+
+def test_extract_tos_candidate_links_excludes_third_party_domains() -> None:
+    from credforge.pipeline.gate import _extract_tos_candidate_links
+
+    # The real bug found live: Alpha Vantage's own docs page cites the
+    # Federal Reserve (FRED), the IMF, and Investopedia as data-source
+    # attribution -- each with a real, keyword-matching "terms" link, none
+    # of which is Alpha Vantage's own ToS. Without a domain filter,
+    # _find_tos_page would fetch and trust a third party's terms page as
+    # if it were the vendor's own, and would issue real, unsolicited
+    # requests to domains that were never the one being resolved.
+    html = """
+    <a href="https://fred.stlouisfed.org/docs/api/terms_of_use.html" target="_blank">FRED API Terms of Use</a>
+    <a href="https://www.imf.org/external/terms.htm" target="_blank">IMF Terms of Use</a>
+    <a href="https://www.alphavantage.co/terms_of_service/" target="_blank">Terms of Service</a>
+    """
+    links = _extract_tos_candidate_links(
+        html, base_url="https://www.alphavantage.co/documentation/", vendor_domain="alphavantage.co"
+    )
+
+    assert links == ["https://www.alphavantage.co/terms_of_service/"]
+    assert not any("fred.stlouisfed.org" in link for link in links)
+    assert not any("imf.org" in link for link in links)
+
+
+def test_extract_tos_candidate_links_does_not_match_tos_as_a_bare_substring() -> None:
+    from credforge.pipeline.gate import _extract_tos_candidate_links
+
+    # The second real bug found live, same page: "tos" as a bare
+    # substring matches inside "ULTOSC" (Alpha Vantage's real Ultimate
+    # Oscillator API function name, used throughout its own example query
+    # URLs) -- same class of collision D-022 already fixed for
+    # heuristic_extractor.py's keyword matching ("captcha" inside
+    # "octocaptcha_origin_optimization"), same fix here.
+    html = """
+    <a href="https://www.alphavantage.co/query?function=ULTOSC&symbol=IBM&apikey=demo">Try it out</a>
+    <a href="https://www.alphavantage.co/terms_of_service/">Terms of Service</a>
+    """
+    links = _extract_tos_candidate_links(
+        html, base_url="https://www.alphavantage.co/documentation/", vendor_domain="alphavantage.co"
+    )
+
+    assert links == ["https://www.alphavantage.co/terms_of_service/"]
+    assert not any("ULTOSC" in link for link in links)
 
 
 def test_extract_tos_candidate_links_returns_empty_on_malformed_html_not_a_crash() -> None:
@@ -779,7 +824,9 @@ def test_extract_tos_candidate_links_returns_empty_on_malformed_html_not_a_crash
 
     # Deliberately broken markup -- must degrade to "no candidates found",
     # never raise, so the caller falls back to the guess list.
-    links = _extract_tos_candidate_links("<a href='/terms'><a><a>>>><div", base_url="https://example.com")
+    links = _extract_tos_candidate_links(
+        "<a href='/terms'><a><a>>>><div", base_url="https://example.com", vendor_domain="example.com"
+    )
     assert isinstance(links, list)
 
 

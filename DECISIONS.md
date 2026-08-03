@@ -3136,3 +3136,59 @@ the existing fixtures populate a homepage response, so they all correctly
 fall through link discovery (finds nothing) straight to the same guess-
 list behavior they tested before this change, proving the fallback is
 truly backward compatible, not just theoretically so.
+
+**Correction, found live before this was ever reported as verified --
+two real bugs in the mechanism just described, both caught by fetching
+Alpha Vantage's actual real docs page directly, outside the pipeline,
+before trusting the synthetic test suite alone:**
+
+1. **No domain filter -- link discovery would have trusted a third
+   party's ToS as the vendor's own.** Alpha Vantage's real docs page
+   cites the Federal Reserve (FRED), the IMF, and Investopedia as
+   data-source attribution, each with a real, `terms`-keyword-matching
+   link, all appearing *before* Alpha Vantage's own real ToS link in
+   document order. `_extract_tos_candidate_links` had no concept of
+   "the vendor being resolved" at all -- it would have fetched
+   `fred.stlouisfed.org`'s Terms of Use (a real, live, fetchable page)
+   and GATE would have evaluated *that* as if it were Alpha Vantage's
+   policy. Fixed: every candidate link is now filtered to
+   `registrable_domain(url) == vendor_domain` before it's ever fetched
+   -- a subdomain of the vendor's own domain still counts (e.g. a
+   `legal.example.com` link), an unrelated domain never does.
+2. **`"tos"` matched as a bare substring inside `"ULTOSC"`** (Alpha
+   Vantage's real Ultimate Oscillator API function name, appearing
+   throughout its own example query URLs on the same docs page) --
+   producing false-positive candidate links pointing at API query
+   examples, not a ToS page. Identical bug class to D-022's
+   `octocaptcha_origin_optimization`/`captcha` collision in
+   `heuristic_extractor.py`, same fix: `_contains_tos_keyword()` now
+   requires a `\b...\b` word-boundary match, not a bare `in` check.
+
+**Why these were only found by fetching the real page directly, not by
+the synthetic test suite:** every hand-written fixture in
+`test_gate.py` was, by construction, shaped like a clean, minimal
+example -- a footer with exactly one plausible link. Real vendor pages
+are not minimal; they cite third parties and reuse ordinary English
+words as API/function names, and only a genuinely messy real page
+exercises either failure mode. Both are now covered by explicit
+regression tests built from the real matched strings
+(`test_extract_tos_candidate_links_excludes_third_party_domains`,
+`test_extract_tos_candidate_links_does_not_match_tos_as_a_bare_substring`),
+not just inferred from the live finding.
+
+**The honest result after both corrections, verified live:** link
+discovery now correctly finds exactly one candidate --
+`https://www.alphavantage.co/terms_of_service/` -- and no others. GATE
+still lands on `TOS_UNVERIFIABLE`, for a third, different, legitimate
+reason: Alpha Vantage's real ToS is served as `application/pdf`, and
+`HttpxFetchProvider` already, correctly, never decodes non-textual
+content into `FetchResult.text` (`_is_textual_content_type()` only
+allows `text/`, `json`, `xml` -- checked directly against the real
+response). `_fetch_usable_page`'s `result.text` check then correctly
+treats the PDF as unusable, the same way it already treats a soft-404
+or a too-short page -- not a new gap, an existing, deliberate one
+(fail closed on unreadable content, don't guess) doing exactly its job
+against a real vendor for the first time. Reading a PDF ToS is real,
+plausible future work (a `pdf` optional extra and a text-extraction
+step at the fetch layer), explicitly not attempted here -- out of scope
+for "find the right URL," which is what was asked and what's now fixed.

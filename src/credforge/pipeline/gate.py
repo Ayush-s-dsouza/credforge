@@ -64,12 +64,14 @@ keyword list happens to recognize the exact phrasing, logged loudly, not
 silently. See DECISIONS.md D-057/D-058.
 """
 
+import re
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
 from ..enums import ApiStyle, PipelineStage, ReasonCode, Status
 from ..models.state import ClassifyResult, CompletenessGap, DiscoveryResult, EvidenceItem, GateResult
 from ..providers.fetch import FetchException, FetchProvider
+from ..utils.domains import registrable_domain
 from ..providers.llm import DiscoveryExtraction, Extractor, TosGateExtraction
 from .explain import NULL_EXPLAIN, ExplainEvent, ExplainSink
 
@@ -302,6 +304,17 @@ def _looks_like_a_real_page(text: str) -> bool:
 _TOS_LINK_KEYWORDS = ("terms", "tos", "legal", "conditions", "agreement")
 
 
+def _contains_tos_keyword(lower_text: str) -> bool:
+    """Word-boundary match, not a bare substring check -- found live,
+    scanning Alpha Vantage's real docs page: "tos" as a bare substring
+    matches inside "ULTOSC" (a real Ultimate Oscillator API function name
+    used throughout the page's example query URLs), producing false-
+    positive candidate links that have nothing to do with a ToS page.
+    Same class of bug, same fix, as D-022's `_contains_hint` in
+    heuristic_extractor.py."""
+    return any(re.search(rf"\b{re.escape(keyword)}\b", lower_text) for keyword in _TOS_LINK_KEYWORDS)
+
+
 class _AnchorLinkParser(HTMLParser):
     """Collects every <a href> on the page paired with its visible text --
     stdlib only, no new dependency for a real, bounded parsing task."""
@@ -328,11 +341,23 @@ class _AnchorLinkParser(HTMLParser):
             self._current_text_parts = []
 
 
-def _extract_tos_candidate_links(html_text: str, *, base_url: str) -> list[str]:
+def _extract_tos_candidate_links(html_text: str, *, base_url: str, vendor_domain: str) -> list[str]:
     """Absolute URLs for every <a> whose href OR visible text contains a
-    ToS/legal keyword, in document order, deduplicated. Never raises --
-    malformed HTML degrades to an empty list (the caller falls back to
-    the guess list), not a crash. See DECISIONS.md D-059."""
+    ToS/legal keyword AND whose registrable domain matches `vendor_domain`,
+    in document order, deduplicated. Never raises -- malformed HTML
+    degrades to an empty list (the caller falls back to the guess list),
+    not a crash.
+
+    The domain filter is not optional: a real vendor docs page routinely
+    links to *other* companies' terms pages as data-source attribution --
+    Alpha Vantage's own real docs page cites the Federal Reserve (FRED),
+    the IMF, and Investopedia, each with a real, fetchable, keyword-
+    matching "terms" link, ahead of Alpha Vantage's own real ToS link in
+    document order. Without this filter, `_find_tos_page` would fetch and
+    trust a third party's ToS as if it were the vendor's own -- wrong,
+    and it would also mean credforge silently issuing real, unsolicited
+    requests to unrelated third-party domains never mentioned as the
+    resolved identity. See DECISIONS.md D-059's follow-up correction."""
     parser = _AnchorLinkParser()
     try:
         parser.feed(html_text)
@@ -345,9 +370,11 @@ def _extract_tos_candidate_links(html_text: str, *, base_url: str) -> list[str]:
         if not href or href.lower().startswith(("#", "mailto:", "javascript:", "tel:")):
             continue
         haystack = f"{href} {text}".lower()
-        if not any(keyword in haystack for keyword in _TOS_LINK_KEYWORDS):
+        if not _contains_tos_keyword(haystack):
             continue
         absolute = urljoin(base_url, href)
+        if registrable_domain(absolute) != vendor_domain:
+            continue
         if absolute not in seen:
             seen.add(absolute)
             candidates.append(absolute)
@@ -381,7 +408,7 @@ async def _find_tos_page(
     seen_candidates: set[str] = set()
 
     def _add_candidates(html_text: str, *, base_url: str) -> None:
-        for url in _extract_tos_candidate_links(html_text, base_url=base_url):
+        for url in _extract_tos_candidate_links(html_text, base_url=base_url, vendor_domain=domain):
             if url not in seen_candidates:
                 seen_candidates.add(url)
                 candidate_urls.append(url)
