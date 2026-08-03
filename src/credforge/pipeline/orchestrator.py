@@ -125,8 +125,22 @@ async def run_app(
     if state.gate.status == Status.AUTO and not dry_run:
         assert vault is not None  # required by the CLI whenever dry_run is False
         extraction = state.discovery.extraction
+        # D-064: state.resolve.chosen.docs_url is the vendor's *documentation*
+        # URL, not necessarily its signup/console URL -- SignupRecipe's own
+        # docstring already names this distinction (OpenWeatherMap's docs and
+        # signup form live at different URLs), and falling back to docs_url
+        # here silently sends the browser to the wrong page whenever
+        # DISCOVER's LLM extraction doesn't happen to populate
+        # developer_portal_url that run. A recipe-pinned fallback is tried
+        # first, same lazy-import fallback pattern as validation_endpoint
+        # (D-063) -- fallback only, never overrides a real DISCOVER
+        # extraction.
+        from ..providers.signup_recipes import LIVE_SIGNUP_RECIPES
+
+        recipe = LIVE_SIGNUP_RECIPES.get(state.identity_key)
         developer_portal_url = (
             (extraction.developer_portal_url if extraction else None)
+            or (recipe.developer_portal_url_fallback if recipe is not None else None)
             or state.resolve.chosen.docs_url
             or f"https://{state.identity_key}"
         )
@@ -163,9 +177,9 @@ async def run_app(
             if validation_endpoint is None:
                 # D-063: fallback only -- never overrides a real DISCOVER
                 # extraction, and does not touch GATE's verdict at all.
-                from ..providers.signup_recipes import LIVE_SIGNUP_RECIPES
-
-                recipe = LIVE_SIGNUP_RECIPES.get(state.identity_key)
+                # `recipe` was already looked up above for
+                # developer_portal_url_fallback (D-064) -- same recipe,
+                # same identity_key, no need to look it up twice.
                 if recipe is not None and recipe.validation_endpoint_fallback is not None:
                     validation_endpoint = recipe.validation_endpoint_fallback
 

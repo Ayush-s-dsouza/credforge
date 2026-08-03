@@ -3461,3 +3461,76 @@ name was actually used) -- passing the stated acceptance test
 ("validation passes with a real status code") while quietly still being
 broken. Verifying the user's own stated assumption ("that placement is
 already handled") before relying on it is what surfaced this.
+
+### D-064: Deployed live-run verification of D-063 found a second, more severe recipe-fallback gap -- PROVISION's target URL, not just VALIDATE's
+
+**Found by actually running the deployed fix, not by re-reading the
+code:** after deploying D-063, the very live run meant to confirm it
+(`alphavantage.co` via the deployed `/api/run` button) came back with
+`credential: null` -- GATE still reached `AUTO` correctly, but PROVISION
+never produced a credential at all. A second attempt (live-run cap had
+budget: 19/20 remaining) failed the same way. A local direct-script run
+of the identical deployed commit, moments earlier, *had* succeeded --
+so this wasn't a code regression, it was real run-to-run variance in
+what DISCOVER's LLM extraction returns.
+
+**Root cause:** the orchestrator's `developer_portal_url` -- the URL
+PROVISION's browser actually navigates to -- fell back to
+`state.resolve.chosen.docs_url` whenever `extraction.developer_portal_url`
+was empty. For Alpha Vantage, `docs_url` (pinned by D-048 identity
+pinning to `https://www.alphavantage.co/documentation/`) is a *different
+page* from the real signup form (`https://www.alphavantage.co/support/#api-key`)
+-- a distinction `SignupRecipe`'s own docstring already named as real
+(citing OpenWeatherMap's docs vs. signup-form URLs as an example) but
+that this particular fallback line didn't honor. When extraction found
+the real signup URL, PROVISION worked (the first post-deploy run, and
+the earlier local test). When it didn't, the browser landed on the docs
+page, where none of `ALPHA_VANTAGE`'s selectors (`#email-text` etc.)
+exist, and PROVISION reported `status="failed"` with zero fanfare --
+`credential: null` in the artifact, no distinguishing detail surfaced
+anywhere in the SSE stream or the HandoffArtifact itself (the failure
+`steps`/`failure_reason` `ProvisionOutcome` carries are real but not
+currently threaded into the artifact -- a gap worth another pass, not
+fixed under this timebox).
+
+**Fixed with the exact same pattern as D-063, one field further:**
+`SignupRecipe.developer_portal_url_fallback`, consulted by the
+orchestrator only when `extraction.developer_portal_url` is `None`,
+before falling back to `docs_url` -- never overriding a real DISCOVER
+extraction, GATE (already computed earlier) completely untouched.
+`ALPHA_VANTAGE.developer_portal_url_fallback` is pinned to
+`"https://www.alphavantage.co/support/#api-key"`, the same URL this
+recipe's own selectors were read from in the first place. The two
+lazy-imported `LIVE_SIGNUP_RECIPES.get(state.identity_key)` lookups
+(this one and D-063's) were consolidated into one, since both now live
+in the same `if AUTO and not dry_run` branch of `run_app()`.
+
+**The deeper pattern across D-063 and D-064:** DISCOVER's LLM extraction
+is unreliable per-field, not just per-run -- a recipe existing for a
+vendor means real, human-verified ground truth already exists for that
+vendor's signup URL, credential-extraction shape, and a known-good
+validation call. Every one of those is now an explicit, pinned fallback
+rather than an assumption that extraction will keep finding it. The
+next field to audit under the same lens, if this class of failure
+recurs, is `base_url` (VALIDATE's other input) -- not fixed here because
+it hasn't yet been observed to fail live, and this project's rule is
+fixing a verified failure, not every theoretically-similar one.
+
+**Verified live, deployed (same commit as this fix, redeployed):**
+third live `/api/run` attempt against `alphavantage.co` --
+`developer_portal_url` resolved correctly, `provision()` →
+`status="provisioned"`, `api_key_ref="vault://alphavantage.co/api_key"`,
+`validate()` → `status="valid"`, `http_status_code=200`. 253/253 tests
+pass (no test changes needed for this fix -- the new field mirrors
+D-063's, and the orchestrator branch it's consumed in has no dedicated
+unit test at this layer; it's exercised by the integration-level live
+verification instead, same as D-063).
+
+**Rejected: also fixing the failure-detail gap (why `steps`/`failure_reason`
+never reach the artifact) in this same pass.** A real, named gap, but a
+different one -- fixing it would mean deciding where a failed
+`ProvisionResult`'s detail belongs in `HandoffArtifact` (a schema
+change, same category of decision D-062 explicitly deferred for a
+narrower reason), which is more than this fix needed to make Alpha
+Vantage's live path work reliably. Noted here so it isn't lost, not
+built speculatively under time pressure.

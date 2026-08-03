@@ -135,6 +135,13 @@ ALPHA_VANTAGE = SignupRecipe(
     # key is passed as a query param, which validate.py already tries
     # first for auth_scheme=api_key (D-044).
     validation_endpoint_fallback="GET https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=IBM",
+    # D-064: found live, post-deploy -- a run where extraction didn't
+    # populate developer_portal_url fell back to docs_url
+    # ("/documentation/"), and PROVISION's browser navigated there instead
+    # of the real signup page, where none of this recipe's selectors
+    # exist. Pinned directly to the real signup form's URL (the same one
+    # documented in the comment block above).
+    developer_portal_url_fallback="https://www.alphavantage.co/support/#api-key",
 )
 
 # ipinfo.io/signup -- first name, last name, email, password (a real

@@ -118,6 +118,19 @@ class SignupRecipe(BaseModel):
     # DISCOVER also having found a correct base_url that same run.
     validation_endpoint_fallback: str | None = None
 
+    # D-064: the real signup/console URL PROVISION's browser should
+    # navigate to, used ONLY as a fallback when DISCOVER's own extraction
+    # doesn't populate developer_portal_url that run -- same fallback-only
+    # rule as validation_endpoint_fallback above. `docs_url` above is
+    # deliberately NOT reused as this fallback: this class's own docstring
+    # already notes docs_url and the signup form URL can be different
+    # pages for the same vendor (confirmed live for alphavantage.co: its
+    # docs live at /documentation/, its real signup form at
+    # /support/#api-key -- a run where extraction didn't find the latter
+    # sent the browser to the former, where none of this recipe's
+    # selectors exist, and PROVISION failed).
+    developer_portal_url_fallback: str | None = None
+
 
 class PlaywrightBrowserDriver:
     def __init__(self, *, recipes: dict[str, SignupRecipe] | None = None) -> None:
