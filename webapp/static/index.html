@@ -70,22 +70,29 @@ here; real under the CLI's <code>--live</code>) provision + validate a credentia
 
 <section id="sec-run">
   <h2>Run it live</h2>
-  <p>Real research every time. Provisioning is mocked <strong>unless</strong> the vendor has a
-     registered signup recipe -- the run log always states which mode was used, never silently.</p>
+  <p>Every run does real search, fetch, extraction, classification and gating. Credential
+     acquisition is real only for vendors with a registered signup recipe -- the banner above the
+     log states which scope applies, every run, never silently.</p>
+
+  <h3 style="margin-bottom:4px;">Live credential acquisition</h3>
+  <p style="font-size:.85em;opacity:.7;margin-top:0;">Real signup, real credential, validated with a
+     real API call. Only the vendors below have a registered signup recipe.</p>
+  <div class="examples-row" id="live-buttons-row"></div>
+  <p class="warn" style="font-size:.85em;">Railway's filesystem is ephemeral: a credential acquired by a live
+     run here is real (vaulted, then validated with a real API call) but lives only in this container's
+     disk. It's shown to you in this session and then gone -- it does <strong>not</strong> persist across a
+     redeploy or restart. The one credential meant to persist is the static NASA example above.</p>
+
+  <h3 style="margin:20px 0 4px;">Research + gating -- try any app</h3>
+  <p style="font-size:.85em;opacity:.7;margin-top:0;">Runs identification, docs discovery, auth
+     classification and the human-needed decision on any vendor. Credential acquisition requires a
+     per-vendor recipe.</p>
   <div class="examples-row">
-    <span style="align-self:center;opacity:.7;font-size:.85em;">research + mocked credential:</span>
     <button onclick="setApp('Notion')">Notion</button>
     <button onclick="setApp('Stripe')">Stripe</button>
     <button onclick="setApp('Linear')">Linear</button>
     <button onclick="setApp('Postmark')">Postmark (obscure)</button>
   </div>
-  <div class="examples-row" id="live-buttons-row">
-    <span style="align-self:center;opacity:.7;font-size:.85em;">real live credential attempt:</span>
-  </div>
-  <p class="warn" style="font-size:.85em;">Railway's filesystem is ephemeral: a credential acquired by a live
-     run here is real (vaulted, then validated with a real API call) but lives only in this container's
-     disk. It's shown to you in this session and then gone -- it does <strong>not</strong> persist across a
-     redeploy or restart. The one credential meant to persist is the static NASA example above.</p>
   <div>
     <input type="text" id="app-input" placeholder="app name, e.g. Stripe">
     <button id="run-btn" onclick="runApp()">Run</button>
@@ -244,7 +251,10 @@ async function runApp() {
         if (!line.startsWith('data: ')) continue;
         const evt = JSON.parse(line.slice(6));
         if (evt.type === 'mode') {
-          appendLine(`<strong style="${evt.live ? 'color:#dc2626' : 'opacity:.75'}">${evt.live ? 'LIVE' : 'MOCKED'}</strong> -- ${escapeHtml(evt.message)}`);
+          // The message itself now states the full scope (RESEARCH + GATING
+          // vs LIVE CREDENTIAL ACQUISITION) -- no separate LIVE/MOCKED word
+          // prepended here, that would just repeat it.
+          appendLine(`<strong style="${evt.live ? 'color:#dc2626' : 'opacity:.75'}">${escapeHtml(evt.message)}</strong>`);
         } else if (evt.type === 'stage') {
           appendLine(`<span class="stage">[${evt.stage}]</span> ${escapeHtml(evt.identity_key)}: ${escapeHtml(evt.message)} <span class="ms">${evt.elapsed_ms}ms</span>`);
         } else if (evt.type === 'search_unavailable') {

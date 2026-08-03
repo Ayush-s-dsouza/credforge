@@ -52,7 +52,12 @@ LIVE_RUN_CAP = int(os.environ.get("LIVE_RUN_CAP", "20"))
 # Purely cosmetic display names for the one-click buttons -- no matching
 # logic lives here, just a label for what _match_recipe_identity() already
 # resolved by domain.
-_RECIPE_DISPLAY_NAMES = {"nasa.gov": "NASA API", "openweathermap.org": "OpenWeatherMap"}
+_RECIPE_DISPLAY_NAMES = {
+    "nasa.gov": "NASA API",
+    "openweathermap.org": "OpenWeatherMap",
+    "alphavantage.co": "Alpha Vantage",
+    "ipinfo.io": "IPinfo",
+}
 
 
 # Set at deploy time (`scripts/deploy_railway.sh`), not baked in by Railway
@@ -271,17 +276,28 @@ async def api_run(request: Request, k: str | None = Query(None)) -> StreamingRes
         start = time.monotonic()
         sink = SSEExplainSink(queue, start)
         run_id = new_run_id()
+        # Labelling only -- what actually runs is unchanged (D-048/D-052/D-053).
+        # The old copy ("Mocked provisioning...") read as if the whole run
+        # were fake; in fact search, fetch, LLM extraction, classification,
+        # and gating are always real -- only the signup stage ever uses a
+        # stand-in, and for a vendor with no recipe it never even executes.
         queue.put_nowait(
             {
                 "type": "mode",
                 "live": use_live,
                 "message": (
-                    f"LIVE provisioning -- recipe registered for {recipe_label}, real signup will be attempted"
+                    "LIVE CREDENTIAL ACQUISITION -- real signup, real credential, "
+                    "validated with a real API call."
                     if use_live
                     else (
-                        "Mocked provisioning -- no signup recipe registered for this vendor"
+                        "RESEARCH + GATING -- real search, fetch and extraction. "
+                        "No signup recipe for this vendor, so credential acquisition is not attempted."
                         if not recipe_match
-                        else "Mocked provisioning -- live provisioning is disabled on this deployment"
+                        else (
+                            "RESEARCH + GATING -- real search, fetch and extraction. "
+                            f"A signup recipe exists for {recipe_label}, but live provisioning is "
+                            "disabled on this deployment, so credential acquisition is not attempted."
+                        )
                     )
                 ),
             }
