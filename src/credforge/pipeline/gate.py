@@ -20,9 +20,23 @@ to a small set of common-URL guesses only when link discovery finds
 nothing (D-059; a fixed guess list alone missed Alpha Vantage's real ToS
 at the unconventional, underscore-separated `/terms_of_service/`). It
 never assumes automation is permitted just because no evidence of
-prohibition turned up elsewhere. If no ToS page can be found at all, that
-is treated as insufficient evidence to clear the app for AUTO, not as a
-pass. See DECISIONS.md D-021.
+prohibition turned up elsewhere.
+
+D-067 (supersedes D-021's original rule): an unfindable ToS page no
+longer blocks AUTO on its own. D-021's original reasoning -- "insufficient
+evidence to clear the app" -- conflated two different things: a vendor
+that has deliberately gated automation (a real HITL, something a human
+must act on) and credforge simply failing to *locate* a policy page that
+may not meaningfully exist in the form this project looks for (found
+live: several real, legitimate government API vendors publish a "Privacy
+Policy and Important Notices" or similar page instead of anything titled
+"Terms of Service," and some publish nothing distinct at all). The
+uncertainty is never silently dropped -- `GateResult.tos_status` records
+"unverifiable" explicitly, `tos_checked_url`/`tos_discovery_method` record
+what was actually tried, and a `completeness_gaps` entry names the gap --
+but it's treated the same way DISCOVERY_INCOMPLETE already is (D-029):
+information a downstream consumer inherits, not a reason to stop the
+whole app at a human.
 
 GATE collects vendor-policy signals from every source it actually has,
 not just the dedicated ToS page: DISCOVER's already-crawled docs page
@@ -30,12 +44,11 @@ not just the dedicated ToS page: DISCOVER's already-crawled docs page
 flags, since a real developer-docs page frequently states pricing or
 verification requirements directly. All signals found, from either
 source, are collected before precedence is applied -- not "return on the
-first hit." TOS_UNVERIFIABLE ranks lowest in that precedence: it fires
-only if the dedicated ToS page couldn't be found AND no blocking signal
-was found anywhere else either. It is a detection failure ("couldn't
-confirm"), not a vendor policy, and must never mask a real
-payment/verification/CAPTCHA finding that's already in hand from the docs
-page. See DECISIONS.md D-040.
+first hit." A found `prohibits_automation` signal still blocks
+absolutely, regardless of which source stated it or whether the dedicated
+ToS page was ever found at all -- that one signal's precedence and
+blocking behavior are completely unchanged by D-067. See DECISIONS.md
+D-040 and D-067.
 
 DISCOVERY_INCOMPLETE (DISCOVER crawled a real API's docs but couldn't pin
 down every expected field) is deliberately NOT a precondition that routes
@@ -69,7 +82,7 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin
 
 from ..enums import ApiStyle, PipelineStage, ReasonCode, Status
-from ..models.state import ClassifyResult, CompletenessGap, DiscoveryResult, EvidenceItem, GateResult
+from ..models.state import ClassifyResult, CompletenessGap, DiscoveryResult, EvidenceItem, GateResult, TosStatus
 from ..providers.fetch import FetchException, FetchProvider
 from ..utils.domains import registrable_domain
 from ..providers.llm import DiscoveryExtraction, Extractor, TosGateExtraction
@@ -398,7 +411,11 @@ async def _fetch_usable_page(url: str, *, fetch: FetchProvider) -> tuple[str, st
 
 async def _find_tos_page(
     domain: str, *, fetch: FetchProvider, docs_html: str | None = None, docs_url: str | None = None
-) -> tuple[str, str] | None:
+) -> tuple[str, str, str] | None:
+    """Returns (url, text, discovery_method) -- discovery_method is
+    "link_discovery" or "guess_list", carried into GateResult.tos_discovery_method
+    (D-067) so the artifact can say not just whether a ToS page was found,
+    but how."""
     # Real link discovery first, from every real page already in hand or
     # cheap to fetch: the docs page DISCOVER already crawled (zero extra
     # fetch cost) and the resolved homepage (one extra fetch -- the other
@@ -427,7 +444,7 @@ async def _find_tos_page(
     for url in candidate_urls:
         found = await _fetch_usable_page(url, fetch=fetch)
         if found is not None:
-            return found
+            return found[0], found[1], "link_discovery"
 
     # Fallback: link discovery found no candidates, or none of them
     # panned out (unreachable, too short, a soft 404) -- try the
@@ -435,7 +452,7 @@ async def _find_tos_page(
     for path in _TOS_URL_GUESSES:
         found = await _fetch_usable_page(f"https://{domain}{path}", fetch=fetch)
         if found is not None:
-            return found
+            return found[0], found[1], "guess_list"
     return None
 
 
@@ -565,8 +582,11 @@ async def gate(
     tos_found = await _find_tos_page(
         identity_key, fetch=fetch, docs_html=discovery.docs_text, docs_url=discovery.docs_url
     )
+    tos_checked_url: str | None = None
+    tos_discovery_method: str | None = None
     if tos_found is not None:
-        tos_url, tos_text = tos_found
+        tos_url, tos_text, tos_discovery_method = tos_found
+        tos_checked_url = tos_url
         tos_signals = await extractor.extract_tos_gate_signals(tos_text=tos_text, tos_url=tos_url)
         tos_signals = _adjust_for_scoped_gate_signals(
             tos_signals,
@@ -589,6 +609,24 @@ async def gate(
 
     blocked = _blocking_gate_result(signal_sources, completeness_gaps=completeness_gaps)
     if blocked is not None:
+        # D-067: prohibits_automation is a definitive, real verdict about
+        # this vendor's ToS regardless of which source stated it (docs
+        # page or the dedicated ToS page) -- verified_prohibited either
+        # way, and this block is completely unaffected by D-067. Any other
+        # blocking flag is a business/structural gate, independent of
+        # whether the dedicated ToS page itself was ever found.
+        tos_status: TosStatus = (
+            "verified_prohibited"
+            if blocked.reason_code == ReasonCode.TOS_PROHIBITS_AUTOMATION
+            else ("verified_permitted" if tos_found is not None else "unverifiable")
+        )
+        blocked = blocked.model_copy(
+            update={
+                "tos_status": tos_status,
+                "tos_checked_url": tos_checked_url,
+                "tos_discovery_method": tos_discovery_method,
+            }
+        )
         explain.emit(
             ExplainEvent(
                 stage=PipelineStage.GATE,
@@ -598,43 +636,63 @@ async def gate(
         )
         return blocked
 
+    # D-067: no blocking signal anywhere scanned -- AUTO either way now,
+    # whether or not the dedicated ToS page was found. An unfindable ToS
+    # page is a detection limitation, not a vendor decision -- HITL is
+    # reserved for what a human must actually resolve. The uncertainty is
+    # never dropped: recorded as both a distinct tos_status and a
+    # completeness gap, same pattern DISCOVERY_INCOMPLETE already
+    # established (D-029).
     if tos_found is None:
-        # No blocking signal anywhere we looked, but the dedicated ToS
-        # page specifically was never found -- TOS_UNVERIFIABLE ranks
-        # lowest in precedence (see _blocking_gate_result), so it only
-        # ever fires here, after every other signal source came back
-        # clean. A clean docs-page scan is not sufficient evidence of a
-        # clean ToS -- D-021's principle still holds.
+        tos_status = "unverifiable"
+        completeness_gaps = [
+            *completeness_gaps,
+            CompletenessGap(
+                field="tos_status",
+                reason=(
+                    "no dedicated ToS/developer-agreement page could be located via link "
+                    "discovery or common guesses -- automation permission could not be "
+                    "independently confirmed one way or the other"
+                ),
+            ),
+        ]
+        evidence_item = EvidenceItem(
+            claim=(
+                "no dedicated ToS page found; no blocking signal found on the developer "
+                "docs page either -- proceeding, uncertainty recorded rather than escalated (D-067)"
+            ),
+            source_url=discovery.docs_url or f"https://{identity_key}",
+            snippet="",
+        )
         explain.emit(
             ExplainEvent(
                 stage=PipelineStage.GATE,
                 identity_key=identity_key,
-                message="no blocking signal found, but the dedicated ToS page is unverifiable -- cannot confirm automation is permitted",
+                message="no blocking signal found; ToS unverifiable -- D-067: AUTO, not HITL, gap recorded",
             )
         )
-        return GateResult(
-            status=Status.HITL,
-            reason_code=ReasonCode.TOS_UNVERIFIABLE,
-            completeness_gaps=completeness_gaps,
+    else:
+        tos_status = "verified_permitted"
+        tos_url, tos_text, _tos_method = tos_found
+        evidence_item = EvidenceItem(
+            claim="ToS reviewed; no automation prohibition or gating signal found",
+            source_url=tos_url,
+            snippet=tos_text[:200].strip(),
+        )
+        explain.emit(
+            ExplainEvent(
+                stage=PipelineStage.GATE,
+                identity_key=identity_key,
+                message="cleared all checks -- eligible for AUTO",
+            )
         )
 
-    tos_url, tos_text = tos_found
-    explain.emit(
-        ExplainEvent(
-            stage=PipelineStage.GATE,
-            identity_key=identity_key,
-            message="cleared all checks -- eligible for AUTO",
-        )
-    )
     return GateResult(
         status=Status.AUTO,
         reason_code=ReasonCode.ELIGIBLE_AUTO,
-        evidence=[
-            EvidenceItem(
-                claim="ToS reviewed; no automation prohibition or gating signal found",
-                source_url=tos_url,
-                snippet=tos_text[:200].strip(),
-            )
-        ],
+        evidence=[evidence_item],
         completeness_gaps=completeness_gaps,
+        tos_status=tos_status,
+        tos_checked_url=tos_checked_url,
+        tos_discovery_method=tos_discovery_method,
     )

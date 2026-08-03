@@ -126,6 +126,33 @@ def test_full_auto_state_produces_a_consistent_artifact() -> None:
     assert artifact.provenance.run_id == "run_1"
 
 
+def test_tos_status_is_carried_from_gate_result_into_the_artifact() -> None:
+    # D-067: GateResult.tos_status/tos_checked_url/tos_discovery_method
+    # must survive into the artifact's own `tos` block verbatim.
+    gate_result = _gate_auto().model_copy(
+        update={"tos_status": "unverifiable", "tos_checked_url": None, "tos_discovery_method": None}
+    )
+    state = _base_state(resolve=_resolved(), discovery=_discovered(), classify=_classified(), gate=gate_result)
+
+    artifact = build_artifact(state)
+
+    assert artifact.tos is not None
+    assert artifact.tos.status == "unverifiable"
+    assert artifact.tos.checked_url is None
+
+
+def test_tos_is_none_on_the_artifact_when_gate_never_reached_its_tos_check() -> None:
+    # A precondition short-circuit (GateResult.tos_status left at its
+    # default None) must produce artifact.tos is None too -- not a
+    # fabricated TosInfo with a made-up status.
+    gate_result = _gate_hitl(ReasonCode.DISCOVERY_FAILED)
+    state = _base_state(resolve=_resolved(), discovery=_discovered(), classify=_classified(), gate=gate_result)
+
+    artifact = build_artifact(state)
+
+    assert artifact.tos is None
+
+
 def test_hitl_state_never_carries_a_credential_even_if_state_has_one_somehow() -> None:
     # Failure drill: a HandoffArtifact must never be constructible with a
     # credential attached to a non-AUTO status -- this is a real invariant,

@@ -3751,3 +3751,250 @@ DOM-probe-confirmed CAPTCHA widget) -- none are unexplained. The generator
 itself -- location, DOM reduction, hard stops, fill/submit, extraction,
 recipe emission -- is real, exercised code, hardened by five genuine live
 findings, not a theoretical design that was never actually run.
+
+### D-066: A browser-rendered fetch fallback in DISCOVER's fetch layer -- the six form-to-key failures were credforge's own limitation, not vendor walls
+
+**The premise, tested and confirmed before writing any code:** DISCOVER_SIGNUP's
+six form-to-key vendor failures (Congress.gov, FEC, Regulations.gov, NREL,
+Guardian, TheCatAPI -- D-065) were assumed to be six separate vendor-side
+problems. Direct investigation of the actual failing page found otherwise:
+`api.congress.gov`'s real raw HTML is 174,997 bytes, almost entirely one
+inlined 170,736-byte `<script>` block, extracting to 79 characters of
+visible text via the existing `_html_to_text` pipeline -- a client-rendered
+Swagger-UI shell that `HttpxFetchProvider` (plain `httpx`, no JS execution)
+can never read, by design. RESOLVE's own conventional docs-URL scoring
+correctly rejects this as "not real API documentation" (`_looks_like_api_docs`,
+D-027) and DISCOVER reports `discovery_failed` -- a correct verdict given
+what it actually saw, but the wrong verdict about the vendor, which really
+does publish a real, well-documented public API.
+
+**Confirmed this generalizes, not vendor-specific:** re-running NASA --
+whose hand-authored recipe already works via the CLI -- through a *fresh*,
+unpinned `resolve()`/`discover()` call (bypassing D-048's identity pinning
+by temporarily emptying `LIVE_SIGNUP_RECIPES`) hit the identical failure:
+`api.nasa.gov`'s raw HTML is a comparably thin JS shell (4,737 bytes,
+content injected via `insertBlockXatY()`). NASA's own recipe was masking
+this limitation, not avoiding it -- D-048's pinning routes around
+RESOLVE's content-verification gate entirely for a vendor a human already
+vouched for, so the gap was invisible until a vendor without a recipe
+needed the exact same page read for real.
+
+**Fixed at the fetch layer, nowhere else:** `HttpxFetchProvider.fetch()`
+now detects a client-rendered app shell deterministically
+(`is_js_rendered_shell()`, `httpx_fetch.py`) and re-fetches the exact same
+URL with a real headless browser (Playwright, already a project
+dependency) only when detected. Every stage that calls `fetch.fetch()`
+-- RESOLVE's docs-URL verification, DISCOVER's crawl, GATE's ToS lookup --
+benefits transparently; none of their own logic changed at all.
+
+**Detection is two independent, both-required conditions, not a single
+threshold:** the extracted visible text must be near-empty (`< 300`
+chars) AND the raw HTML must carry a nontrivial amount of script content
+(`>= 2,000` bytes across `<script>` tags). Neither alone is proof --
+thin text alone doesn't distinguish a JS shell from a real page that's
+just genuinely short (a "Service Unavailable" stub, for instance);
+substantial script alone doesn't distinguish a shell from an ordinary
+page that happens to carry analytics/widget scripts alongside real
+content. Calibrated against two real, captured pages
+(`tests/fixtures/js_shell_detection/`), not guessed: `api.congress.gov`
+(79 extracted chars from 174,997 raw bytes, one 170,736-byte script) vs.
+Alpha Vantage's real documentation page (723,348 extracted chars from
+~1MB raw) -- both thresholds sit with wide margin on both sides of these
+two real, opposite data points.
+
+**A real, second bug found while wiring the detection check in, not
+theoretical:** `_html_to_text`'s existing, deliberate fallback --
+"malformed markup, return the raw HTML rather than lose the page entirely
+when extraction comes back empty" -- would have silently defeated shell
+detection for a page with *genuinely zero* extracted text (as opposed to
+api.congress.gov's real, non-zero-but-thin 79 characters): the shell
+check would receive the raw HTML itself as "extracted_text," which is
+large, not near-empty, and never fires. Split into `_extract_visible_text`
+(the true, possibly-empty parse, used only for the shell check) and
+`_html_to_text` (unchanged public behavior, still falls back to raw HTML
+for its own callers) so this interaction can't happen. Found by a failing
+test with a synthetic zero-text fixture, not by inspection.
+
+**Every existing guard preserved, none bypassed:** robots.txt is checked
+once, before ANY request (plain or browser) against a URL -- not
+re-checked for the browser re-fetch of the identical, already-cleared
+URL. The rate limiter IS re-acquired for the browser fetch -- a second,
+real network round-trip to the same origin, metered independently since
+browser renders are expensive. A hard, explicit timeout
+(`browser_render_timeout_ms`, default 10s) on `page.goto()` means a slow
+or hung page fails this one fetch, never hangs the run. A render cache
+(`self._render_cache`, keyed by URL, living on the `HttpxFetchProvider`
+instance -- constructed once per run and reused across every stage)
+means the same URL is never rendered twice in one run, and a cached
+failure (`None`) is also never retried. Any exception during rendering
+(including `playwright` not being installed at all -- the default,
+non-`[live]` install) degrades to `None`, falling back to the original
+plain-HTTP result rather than crashing the caller -- the same
+"one fetch's failure never takes down the run" principle every other
+`FetchException` path in this project already follows.
+
+**Auditability, not silent substitution:** `FetchResult.rendered_with_browser`
+carries through `DiscoveryResult.docs_rendered_with_browser` into EMIT's
+own evidence claim (`"... (browser-rendered -- plain HTTP fetch found a
+JS app shell)"`) -- a consumer of the artifact can tell a browser-rendered
+page's evidence apart from an ordinary fetch's, not just get richer text
+with no explanation of where it came from. GATE was not touched at all;
+it calls `fetch.fetch()` exactly as before and has no idea whether the
+result underneath it needed a browser.
+
+**Rejected: solving this by weakening RESOLVE's docs-candidate
+verification** (accepting thin pages as documentation on faith). Would
+trade a real, deliberate guardrail (D-027's whole reason for existing --
+rejecting pages that only superficially look like documentation) for a
+narrower win on JS-shell-fronted vendors specifically, and would let
+through the exact class of false-positive D-027 was built to reject.
+
+**Rejected: rendering every fetch with a browser by default.** Browser
+renders are meaningfully more expensive (a real Chromium launch per URL)
+than a plain HTTP request; the two-condition shell check exists
+specifically so this stays the rare exception, not the common path.
+
+**Verified live:** `api.nasa.gov` -- unpinned, the exact page that
+previously produced `discovery_failed` -- now returns
+`docs_rendered_with_browser=True`, `has_public_api=True`,
+`auth_scheme=api_key`, with five real evidence snippets (rate limits,
+`DEMO_KEY` explanation) extracted from content a plain fetch alone could
+never have seen. 292/292 tests pass, including four new tests against
+the two real captured fixtures and five new integration tests for the
+fallback's calling behavior (shell detected -> browser render used;
+normal page -> browser never invoked; render failure -> graceful
+degradation to the original thin text; render cache short-circuits both
+a cached success and a cached failure without ever reaching Playwright).
+
+### D-067: An unfindable ToS page no longer blocks AUTO -- HITL is for what a human must resolve, not for credforge's own detection failing
+
+**The premise, found live investigating D-066's remaining gap:** with
+D-066 fixed, NASA (unpinned) correctly reaches DISCOVER with real content
+and a real `api_key` classification -- but GATE still returned HITL, for
+an entirely different, unrelated reason: `tos_unverifiable`. Direct
+investigation (not assumed) of what NASA and FEC actually publish found a
+real, if partial, pattern: NASA's real policy page is titled "Privacy
+Policy and Important Notices" (content: genuinely about data collection
+and cookies, no automation-relevant language); FEC's is "Privacy and
+security policy" (content: a real, substantive Computer Fraud and Abuse
+Act clause). Neither is titled anything resembling "Terms of Service."
+`api.data.gov` -- the shared platform NASA, Congress.gov, FEC, and NREL
+all provision keys through -- was checked directly for a possible
+cross-domain terms page to lean on: it has none (`/terms/`,
+`/terms-of-service/` both 404; the one plausible link on its own signup
+page, "Website Policies," is itself a dead 404).
+
+**Widening GATE's keyword list was considered and rejected, not
+attempted.** The two real gov pages found don't even share terminology
+with each other ("notices" vs. neither "notices" nor "policy" alone
+covers both without also being broad enough to match ordinary commercial
+Privacy Policy links project-wide -- pages that, for a typical commercial
+vendor, essentially never discuss automation/payment/business-verification
+at all). A keyword change broad enough to catch both real gov pages found
+here would measurably change GATE's ToS-discovery behavior across the
+already-measured 20-app seed batch (README's "Measured coverage" section,
+one specific canonical run) in ways impossible to validate for precision
+regression within this session. Fixing the underlying *logic* instead
+makes this keyword question moot rather than resolving it by guesswork.
+
+**Decided:** `tos_unverifiable` no longer routes to `HITL`. Three outcomes
+that used to collapse into two:
+
+- ToS found, prohibition present -> `HITL` / `TOS_PROHIBITS_AUTOMATION`
+  (**completely unchanged** -- see below).
+- ToS found, no prohibition -> `AUTO` (unchanged).
+- ToS **not found** -> now `AUTO` too, with the uncertainty carried
+  forward explicitly, not escalated to a human.
+
+**The reasoning is D-029 applied consistently, not a new principle.**
+`DISCOVERY_INCOMPLETE` already established exactly this pattern: DISCOVER
+crawling a real API's docs but not pinning down every expected field is
+"information a downstream consumer inherits," never a reason to stop the
+whole app at a human. `TOS_UNVERIFIABLE`'s old behavior treated a
+structurally identical situation -- credforge's own detection failing to
+locate a page, not a vendor decision -- inconsistently, as a HITL block.
+It's also the honest description of what already happens: this project's
+own README already buckets `tos_unverifiable` as `PIPELINE_LIMITED`
+("reducible, credforge just couldn't confirm"), explicitly distinct from
+`VENDOR_BLOCKED`, in the very same measured-coverage table this decision
+now makes structurally true rather than just labeled that way. And the
+manual process this project automates doesn't check terms before signing
+up for a free API key either -- credforge was holding automation to a
+higher evidentiary bar than the human process it replaces.
+
+**The uncertainty is never silently dropped.** `GateResult` gained
+`tos_status: Literal["verified_permitted", "verified_prohibited",
+"unverifiable"] | None` (`None` only when a precondition --
+`DISCOVERY_FAILED`/`NO_PUBLIC_API`/`CLASSIFY_LOW_CONFIDENCE` -- returned
+before GATE ever reached its ToS-checking logic at all, distinct from
+genuinely trying and failing to find one), plus `tos_checked_url` and
+`tos_discovery_method` (`"link_discovery"` | `"guess_list"` | `None`,
+threaded out of `_find_tos_page`, which now reports how it found what it
+found, not just whether). `HandoffArtifact` gained a matching `tos:
+TosInfo | None` block. On the unverifiable path, a `completeness_gaps`
+entry (`field="tos_status"`) names exactly what couldn't be confirmed and
+that link discovery plus the guess list were both tried -- same shape as
+every other completeness gap in this project.
+
+**A found prohibition is completely untouched by this change, verified
+directly, not assumed:** `prohibits_automation` still blocks absolutely
+regardless of which source stated it (the dedicated ToS page or the
+already-crawled docs page) -- `tos_status="verified_prohibited"` either
+way, computed from `_blocking_gate_result`'s own returned `reason_code`,
+never from whether the dedicated ToS page specifically was found. The
+existing Etsy-shaped regression test
+(`test_etsy_shaped_unscoped_prohibition_still_fires`) and a new
+docs-page-only variant (`test_prohibition_found_on_docs_page_alone_is_still_verified_prohibited`)
+both assert `HITL`/`TOS_PROHIBITS_AUTOMATION` unchanged.
+
+**Rejected: making `tos_status="unverifiable"` also downgrade GATE's own
+`status`/`reason_code` fields to something other than
+`AUTO`/`ELIGIBLE_AUTO`.** `HandoffArtifact`'s own construction-time
+invariant (already enforced, D-001) requires `status=AUTO` to always
+carry `reason_code=ELIGIBLE_AUTO` -- exactly the same shape
+`DISCOVERY_INCOMPLETE` already uses (a result-object-level marker that
+never becomes the final artifact's own `reason_code`). Threading a
+special reason code through for the AUTO-but-unverifiable case would have
+meant either weakening that invariant or inventing a new AUTO/reason_code
+combination nothing else in the schema does.
+
+**Verified:** 296/296 tests pass -- 6 existing tests updated to the new,
+correct expected behavior (each one's prior assertion was the literal
+thing this decision changed, not a regression), 4 new tests added
+covering the prohibited-via-docs-page case, the precondition-short-circuit
+`None` case, and both directions of the `emit.py` artifact wiring.
+
+Live, both individually and through a full fresh re-run of the real
+20-app seed batch (`run_20260803T231604Z_0d0ff1d8`, `.credforge` pointed
+at a fresh, empty data dir so every app was genuinely re-evaluated, not
+resumed from a prior run's registry): **AUTO went from 6 to 10, HITL from
+12 to 9, UNSUPPORTED from 2 to 1.** Four apps moved specifically because
+of D-066/D-067, confirmed by reading each one's real persisted artifact,
+not just its console-printed status:
+
+- **NASA API**: `UNSUPPORTED`/`no_public_api` -> `AUTO`/`eligible_auto`,
+  `auth_scheme=api_key` -- D-066. The artifact's own evidence array reads
+  *"docs source selected: LOW-tier ... (browser-rendered -- plain HTTP
+  fetch found a JS app shell)"* -- the exact mechanism, stated plainly,
+  in the real output a downstream consumer would actually see.
+- **Notion**, **Open-Meteo**, **Etsy**: each `HITL`/`tos_unverifiable` ->
+  `AUTO`/`eligible_auto` -- D-067. Each artifact's `tos` block reads
+  `{"status": "unverifiable", "checked_url": null, "discovery_method":
+  null}` and carries a `tos_status` completeness gap -- the uncertainty
+  this decision exists to preserve is visibly still there, just no longer
+  blocking.
+
+Four more apps changed `reason_code` while staying `HITL` (Auth0:
+`classify_low_confidence` -> `tos_prohibits_automation`; HubSpot:
+`classify_low_confidence` -> `requires_payment`; OpenWeatherMap:
+`requires_payment` -> `tos_prohibits_automation`; Google Calendar:
+`tos_unverifiable` -> `classify_low_confidence`) and Slack moved
+`classify_low_confidence` -> `AUTO`; Discord moved the other direction,
+`AUTO` -> `HITL`/`resolve_not_found`. None of these six are D-066/D-067
+effects -- they're the same real, already-documented run-to-run
+LLM-extraction and search-provider variance this project's README already
+names as a standing characteristic (the source-authority-weighting
+table's own "before/after" comparison shows the identical pattern for
+apps untouched by that change either). Every one of the four
+directly-attributed moves was confirmed by inspecting the real artifact's
+own evidence/tos fields, not inferred from the status change alone.

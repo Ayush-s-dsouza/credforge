@@ -31,6 +31,13 @@ class FetchResult(BaseModel):
     text: str | None
     fetched_at: datetime
     from_cache: bool = False
+    # D-066: True only when the initial plain-HTTP fetch's extracted text
+    # looked like a client-rendered app shell (near-zero visible text
+    # despite substantial script content) and a real headless-browser
+    # re-fetch of the same URL was used instead -- so `text` here is what a
+    # browser actually rendered, not what the raw HTML alone contained. See
+    # HttpxFetchProvider.fetch()/is_js_rendered_shell.
+    rendered_with_browser: bool = False
 
 
 class FetchError(BaseModel):

@@ -17,7 +17,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..enums import ApiStyle, AuthScheme, CredentialType, ReasonCode, SourceTier, Status
-from .state import CompletenessGap, EvidenceItem
+from .state import CompletenessGap, EvidenceItem, TosStatus
 
 
 class AppInfo(BaseModel):
@@ -97,6 +97,20 @@ class Provenance(BaseModel):
     credforge_version: str
 
 
+class TosInfo(BaseModel):
+    """D-067: what GATE actually learned about this vendor's ToS/policy --
+    always present once GATE ran far enough to check (i.e. whenever `api`
+    is set below). An "unverifiable" status is a real, honest outcome in
+    its own right, not an absence of this field -- a consumer checking
+    only `status`/`credential` would otherwise have no way to tell "GATE
+    confirmed no prohibition" apart from "GATE never found a ToS page to
+    check at all," and those are materially different claims to hand off."""
+
+    status: TosStatus
+    checked_url: str | None = None
+    discovery_method: str | None = None
+
+
 class HandoffArtifact(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -110,6 +124,7 @@ class HandoffArtifact(BaseModel):
     # research-only artifact legitimately has no credential yet.
     credential: CredentialInfo | None = None
     validation: ValidationInfo | None = None
+    tos: TosInfo | None = None
     evidence: list[EvidenceItem] = Field(default_factory=list)
     completeness_gaps: list[CompletenessGap] = Field(default_factory=list)
     provenance: Provenance

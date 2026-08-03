@@ -1,4 +1,5 @@
 import gzip
+from pathlib import Path
 
 import httpx
 import pytest
@@ -6,7 +7,10 @@ import respx
 
 from credforge.net.rate_limiter import DomainRateLimiter
 from credforge.providers.fetch import FetchException
-from credforge.providers.httpx_fetch import HttpxFetchProvider
+from credforge.providers.httpx_fetch import HttpxFetchProvider, is_js_rendered_shell
+from credforge.providers.httpx_fetch import _html_to_text
+
+_FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "js_shell_detection"
 
 
 def _provider(max_response_bytes: int | None = None) -> HttpxFetchProvider:
@@ -266,3 +270,143 @@ async def test_corrupted_pdf_raises_a_typed_pdf_decode_error_not_unhandled() -> 
         await provider.fetch("https://example.com/corrupt.pdf")
 
     assert exc_info.value.error.reason == "pdf_decode_error"
+
+
+# --- D-066: JS-shell detection, calibrated against two real captured pages ---
+
+
+def test_is_js_rendered_shell_true_on_a_real_captured_js_app_shell() -> None:
+    # api.congress.gov's real raw HTML, captured live: 174,997 bytes, almost
+    # entirely one inlined 170,736-byte <script> block, extracting to 79
+    # characters of visible text. This is the exact page that produced a
+    # real DISCOVERY_FAILED this session before this fix existed.
+    raw_html = (_FIXTURES_DIR / "real_js_shell.html").read_text(encoding="utf-8")
+    extracted = _html_to_text(raw_html)
+    assert is_js_rendered_shell(raw_html=raw_html, extracted_text=extracted) is True
+
+
+def test_is_js_rendered_shell_false_on_a_real_captured_static_docs_page() -> None:
+    # Alpha Vantage's real, live documentation page: ~1MB raw HTML,
+    # extracting to over 700,000 characters of real, substantial prose.
+    raw_html = (_FIXTURES_DIR / "real_static_docs.html").read_text(encoding="utf-8")
+    extracted = _html_to_text(raw_html)
+    assert is_js_rendered_shell(raw_html=raw_html, extracted_text=extracted) is False
+
+
+def test_is_js_rendered_shell_false_for_a_genuinely_short_but_real_page() -> None:
+    # Thin text alone is not proof -- a real page can legitimately be short.
+    # Only combined with substantial script content does it count as a shell.
+    raw_html = "<html><body><h1>Service Unavailable</h1><p>Try again later.</p></body></html>"
+    extracted = _html_to_text(raw_html)
+    assert is_js_rendered_shell(raw_html=raw_html, extracted_text=extracted) is False
+
+
+def test_is_js_rendered_shell_false_when_script_present_but_text_is_substantial() -> None:
+    # A real page can carry plenty of script (analytics, widgets) without
+    # being an app shell -- what matters is whether real content ALSO exists.
+    raw_html = "<html><body>" + "<script>var x = 1;</script>" * 200 + "<p>" + ("Real content. " * 50) + "</p></body></html>"
+    extracted = _html_to_text(raw_html)
+    assert len(extracted) >= 300
+    assert is_js_rendered_shell(raw_html=raw_html, extracted_text=extracted) is False
+
+
+# --- D-066: the browser-render fallback, integration behavior -----------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_falls_back_to_browser_render_on_a_detected_js_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    shell_html = "<html><body><div id=\"root\"></div>" + "<script>" + ("x=1;" * 1000) + "</script></body></html>"
+    respx.get("https://example.com/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://example.com/app").mock(
+        return_value=httpx.Response(200, text=shell_html, headers={"content-type": "text/html"})
+    )
+
+    provider = _provider()
+    calls: list[str] = []
+
+    async def fake_render(url: str, *, domain: str) -> str:
+        calls.append(url)
+        return "This is the real, rendered content a browser would have seen."
+
+    monkeypatch.setattr(provider, "_render_with_browser", fake_render)
+
+    result = await provider.fetch("https://example.com/app")
+
+    assert result.rendered_with_browser is True
+    assert result.text == "This is the real, rendered content a browser would have seen."
+    assert calls == ["https://example.com/app"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_does_not_attempt_browser_render_on_a_normal_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    respx.get("https://example.com/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://example.com/docs").mock(
+        return_value=httpx.Response(200, text="<html><body><p>Real, substantial content. " * 20 + "</p></body></html>", headers={"content-type": "text/html"})
+    )
+
+    provider = _provider()
+    calls: list[str] = []
+
+    async def fake_render(url: str, *, domain: str) -> str:
+        calls.append(url)
+        return "should never be called"
+
+    monkeypatch.setattr(provider, "_render_with_browser", fake_render)
+
+    result = await provider.fetch("https://example.com/docs")
+
+    assert result.rendered_with_browser is False
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_browser_render_failure_degrades_to_the_original_thin_text_not_a_crash() -> None:
+    # A slow/broken browser render must never take the whole fetch down --
+    # falls back to the (thin) plain-HTTP text, exactly pre-D-066 behavior.
+    shell_html = "<html><body><div id=\"root\"></div>" + "<script>" + ("x=1;" * 1000) + "</script></body></html>"
+    respx.get("https://example.com/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://example.com/app").mock(
+        return_value=httpx.Response(200, text=shell_html, headers={"content-type": "text/html"})
+    )
+
+    provider = _provider()
+    provider._browser_render_timeout_ms = 1  # force a real, immediate timeout, no mocking of playwright itself
+
+    result = await provider.fetch("https://example.com/app")
+
+    # Falls back to exactly what _html_to_text(raw_html) alone would have
+    # produced pre-D-066 -- this shell has zero real visible text, so that
+    # function's own existing fallback (return raw HTML rather than lose a
+    # page) is what's expected here, not a new behavior this fix introduced.
+    assert result.rendered_with_browser is False
+    assert result.text == shell_html
+
+
+@pytest.mark.asyncio
+async def test_render_cache_short_circuits_before_ever_launching_a_browser() -> None:
+    # A pre-populated cache entry must return immediately, never reaching
+    # the `from playwright.async_api import ...` line at all -- proven here
+    # by NOT mocking Playwright and asserting the cached value comes back
+    # (a real launch attempt would either be slow or fail in this sandbox,
+    # neither of which happens if the cache is actually consulted first).
+    provider = _provider()
+    provider._render_cache["https://example.com/shell"] = "cached rendered text"
+
+    result = await provider._render_with_browser("https://example.com/shell", domain="example.com")
+
+    assert result == "cached rendered text"
+
+
+@pytest.mark.asyncio
+async def test_render_cache_also_short_circuits_a_cached_failure() -> None:
+    # A prior failed render (cached as None) must also not be retried within
+    # the same run -- same "expensive, don't repeat" reasoning as a success.
+    provider = _provider()
+    provider._render_cache["https://example.com/broken"] = None
+
+    result = await provider._render_with_browser("https://example.com/broken", domain="example.com")
+
+    assert result is None

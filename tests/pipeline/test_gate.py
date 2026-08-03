@@ -118,14 +118,19 @@ async def test_low_confidence_classification_routes_to_hitl_before_any_tos_check
 
 
 @pytest.mark.asyncio
-async def test_tos_unverifiable_when_no_tos_page_can_be_found() -> None:
+async def test_tos_unverifiable_no_longer_blocks_auto() -> None:
+    # D-067: an unfindable ToS page is a detection limitation, not a
+    # vendor decision -- AUTO, with the uncertainty recorded, not HITL.
     fetch = FakeFetchProvider({})  # every guess fails
     extractor = FakeExtractor()
 
     result = await gate("example.com", discovery=DISCOVERED_OK, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor)
 
-    assert result.status == Status.HITL
-    assert result.reason_code == ReasonCode.TOS_UNVERIFIABLE
+    assert result.status == Status.AUTO
+    assert result.reason_code == ReasonCode.ELIGIBLE_AUTO
+    assert result.tos_status == "unverifiable"
+    assert result.tos_checked_url is None
+    assert "tos_status" in {g.field for g in result.completeness_gaps}
     assert extractor.tos_calls == 0  # nothing to extract from
 
 
@@ -154,6 +159,8 @@ async def test_soft_404_tos_page_is_skipped_in_favor_of_the_next_guess() -> None
 
 @pytest.mark.asyncio
 async def test_tos_unverifiable_when_every_guess_is_a_soft_404() -> None:
+    # D-067: still correctly detected as unverifiable (every guess is a
+    # soft 404, none usable) -- but that no longer means HITL.
     fetch = FakeFetchProvider(
         {f"https://example.com{path}": _ok("Page not found. " * 20) for path in [
             "/developers/terms", "/developer-terms", "/legal/developer-terms",
@@ -164,8 +171,9 @@ async def test_tos_unverifiable_when_every_guess_is_a_soft_404() -> None:
 
     result = await gate("example.com", discovery=DISCOVERED_OK, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor)
 
-    assert result.status == Status.HITL
-    assert result.reason_code == ReasonCode.TOS_UNVERIFIABLE
+    assert result.status == Status.AUTO
+    assert result.reason_code == ReasonCode.ELIGIBLE_AUTO
+    assert result.tos_status == "unverifiable"
     assert extractor.tos_calls == 0
 
 
@@ -180,6 +188,8 @@ async def test_clean_tos_clears_to_auto() -> None:
     assert result.reason_code == ReasonCode.ELIGIBLE_AUTO
     assert result.evidence[0].source_url == "https://example.com/terms"
     assert result.evidence[0].snippet  # real snippet, not empty
+    assert result.tos_status == "verified_permitted"
+    assert result.tos_checked_url == "https://example.com/terms"
 
 
 @pytest.mark.parametrize(
@@ -322,7 +332,11 @@ async def test_graphql_api_style_suppresses_only_the_rest_specific_completeness_
         ),
         api_style=ApiStyle.GRAPHQL,
     )
-    fetch = FakeFetchProvider({"https://example.com/terms": _ok(LONG_TOS_TEXT)})
+    # Domain matches the identity_key under test ("linear.app") so the ToS
+    # page is actually found -- keeps this test's real assertion (which
+    # completeness gaps get suppressed for a confirmed GraphQL API) clean
+    # of the separate tos_status gap D-067 would otherwise add here too.
+    fetch = FakeFetchProvider({"https://linear.app/terms": _ok(LONG_TOS_TEXT)})
     extractor = FakeExtractor(_clean_tos())
 
     result = await gate(
@@ -496,11 +510,13 @@ async def test_scoped_payment_override_also_applies_to_the_developer_docs_signal
 
     result = await gate("example.com", discovery=discovery, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor)
 
-    # TOS_UNVERIFIABLE, not requires_payment and not AUTO -- the dedicated
-    # ToS page genuinely couldn't be found (D-021 still applies), but the
-    # docs-page requires_payment signal must have been suppressed rather
-    # than blocking outright.
-    assert result.reason_code == ReasonCode.TOS_UNVERIFIABLE
+    # AUTO (D-067: an unfindable dedicated ToS page no longer blocks on its
+    # own), with tos_status recording the real uncertainty -- and,
+    # unaffected by that change, the docs-page requires_payment signal
+    # must still have been suppressed rather than blocking outright.
+    assert result.status == Status.AUTO
+    assert result.reason_code == ReasonCode.ELIGIBLE_AUTO
+    assert result.tos_status == "unverifiable"
 
 
 # --- D-057 regression guard: real vendor blocks must still fire ------------
@@ -524,6 +540,55 @@ async def test_etsy_shaped_unscoped_prohibition_still_fires() -> None:
 
     assert result.status == Status.HITL
     assert result.reason_code == ReasonCode.TOS_PROHIBITS_AUTOMATION
+    # D-067: a found prohibition is a definitive, real verdict -- always
+    # "verified_prohibited", completely unaffected by the unverifiable-ToS
+    # change (this ToS page WAS found and read; it just said no).
+    assert result.tos_status == "verified_prohibited"
+    assert result.tos_checked_url == "https://example.com/terms"
+
+
+@pytest.mark.asyncio
+async def test_prohibition_found_on_docs_page_alone_is_still_verified_prohibited() -> None:
+    # D-067: prohibits_automation found on the developer docs page, with
+    # the dedicated ToS page unreachable -- tos_status must still be
+    # "verified_prohibited", not "unverifiable". The real-world fact (this
+    # vendor prohibits automation) doesn't become less true just because
+    # the *specific document* that stated it wasn't the one this project
+    # calls "the ToS page."
+    text = "You may not use bots or automated means to access this API. " * 5
+    discovery = DiscoveryResult(
+        reason_code=None, docs_url="https://docs.example.com", docs_text=text,
+        extraction=DiscoveryExtraction(has_public_api=True),
+    )
+    fetch = FakeFetchProvider({})  # no dedicated ToS page reachable
+    extractor = PerUrlExtractor(
+        {"https://docs.example.com": _clean_tos().model_copy(update={"prohibits_automation": True, "evidence_snippets": [text]})}
+    )
+
+    result = await gate("example.com", discovery=discovery, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor)
+
+    assert result.status == Status.HITL
+    assert result.reason_code == ReasonCode.TOS_PROHIBITS_AUTOMATION
+    assert result.tos_status == "verified_prohibited"
+    assert result.tos_checked_url is None  # the dedicated ToS page itself was never found
+
+
+@pytest.mark.asyncio
+async def test_precondition_short_circuits_leave_tos_status_unset() -> None:
+    # tos_status is None only when GATE never reached its ToS-checking
+    # logic at all -- a precondition (here, DISCOVERY_FAILED) returned
+    # first. Distinct from "unverifiable", which means GATE tried and
+    # genuinely couldn't find a ToS page.
+    discovery = DiscoveryResult(reason_code=ReasonCode.DISCOVERY_FAILED)
+    fetch = FakeFetchProvider({})
+    extractor = FakeExtractor()
+
+    result = await gate("example.com", discovery=discovery, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor)
+
+    assert result.status == Status.HITL
+    assert result.reason_code == ReasonCode.DISCOVERY_FAILED
+    assert result.tos_status is None
+    assert result.tos_checked_url is None
 
 
 @pytest.mark.asyncio
@@ -652,7 +717,7 @@ async def test_structural_guard_does_not_override_genuinely_unscoped_language_fo
 
 
 @pytest.mark.asyncio
-async def test_alpha_vantage_real_shape_flags_are_suppressed_but_no_tos_page_means_still_not_auto() -> None:
+async def test_alpha_vantage_real_shape_flags_are_suppressed_and_reaches_auto_despite_no_tos_page() -> None:
     # End-to-end regression for the actual reported case: the full real
     # sentence (both the premium-endpoint/payment clause AND the
     # commercial-use/sales-contact clause DISCOVER's crawl would return
@@ -685,17 +750,17 @@ async def test_alpha_vantage_real_shape_flags_are_suppressed_but_no_tos_page_mea
         "alphavantage.co", discovery=discovery, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor
     )
 
-    # Honest, not AUTO: with no dedicated ToS page reachable under any of
-    # GATE's guessed paths (matching the real live run's own log line,
-    # "could not locate a dedicated ToS/developer-agreement page"),
-    # TOS_UNVERIFIABLE still fires -- D-021's principle that a clean
-    # docs-page scan alone is never sufficient evidence of a clean ToS is
-    # untouched by D-058. What D-058 actually proves here: neither flag
-    # is what's blocking it anymore.
-    assert result.status == Status.HITL
-    assert result.reason_code == ReasonCode.TOS_UNVERIFIABLE
-    assert result.reason_code != ReasonCode.REQUIRES_PAYMENT
-    assert result.reason_code != ReasonCode.REQUIRES_SALES_CONTACT
+    # D-067: with no dedicated ToS page reachable under any of GATE's
+    # guessed paths (matching the real live run's own log line, "could
+    # not locate a dedicated ToS/developer-agreement page"), the app now
+    # reaches real AUTO -- an unfindable ToS page no longer blocks on its
+    # own (superseding this test's original D-021-era expectation). The
+    # uncertainty isn't dropped: tos_status records "unverifiable"
+    # explicitly. What D-058 proves here, unchanged: neither payment nor
+    # sales_contact is what would have blocked it either.
+    assert result.status == Status.AUTO
+    assert result.reason_code == ReasonCode.ELIGIBLE_AUTO
+    assert result.tos_status == "unverifiable"
 
 
 @pytest.mark.asyncio
@@ -1032,10 +1097,11 @@ async def test_tos_page_prohibition_still_outranks_docs_page_payment_signal() ->
 
 
 @pytest.mark.asyncio
-async def test_docs_page_clean_and_tos_unfindable_is_still_unverifiable_not_auto() -> None:
-    # A clean docs-page scan is not sufficient evidence of a clean ToS --
-    # D-021's principle still holds. TOS_UNVERIFIABLE only fires here,
-    # after confirming no signal was found anywhere, never before.
+async def test_docs_page_clean_and_tos_unfindable_still_reaches_auto_with_gap_recorded() -> None:
+    # D-067: a clean docs-page scan plus an unfindable dedicated ToS page
+    # now reaches AUTO -- tos_status="unverifiable" records exactly what
+    # D-021's original HITL used to represent, but as carried-forward
+    # uncertainty (a completeness gap), not an escalation to a human.
     discovery = DiscoveryResult(
         reason_code=None, docs_url="https://docs.example.com", docs_text=LONG_DOCS_TEXT,
         extraction=DiscoveryExtraction(has_public_api=True),
@@ -1045,8 +1111,10 @@ async def test_docs_page_clean_and_tos_unfindable_is_still_unverifiable_not_auto
 
     result = await gate("example.com", discovery=discovery, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor)
 
-    assert result.status == Status.HITL
-    assert result.reason_code == ReasonCode.TOS_UNVERIFIABLE
+    assert result.status == Status.AUTO
+    assert result.reason_code == ReasonCode.ELIGIBLE_AUTO
+    assert result.tos_status == "unverifiable"
+    assert "tos_status" in {g.field for g in result.completeness_gaps}
 
 
 @pytest.mark.asyncio

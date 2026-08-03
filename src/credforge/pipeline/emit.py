@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 
 from .. import __version__
 from ..enums import Status
-from ..models.artifact import ApiInfo, AppInfo, CredentialInfo, HandoffArtifact, Provenance, ValidationInfo
+from ..models.artifact import ApiInfo, AppInfo, CredentialInfo, HandoffArtifact, Provenance, TosInfo, ValidationInfo
 from ..models.state import AppPipelineState, EvidenceItem
 
 
@@ -147,14 +147,33 @@ def _build_from_gate(state: AppPipelineState, *, credforge_version: str) -> Hand
     # is independent corroboration, matching every other evidence item's
     # shape (see the "resolved identity to" item above).
     if state.discovery and state.discovery.docs_url and state.discovery.source_tier_reason:
+        # D-066: noted directly in the claim, not a separate field -- a
+        # browser-rendered page is real, legitimate evidence, but the
+        # artifact should say so explicitly rather than leave it
+        # indistinguishable from an ordinary plain-HTTP fetch.
+        rendered_note = " (browser-rendered -- plain HTTP fetch found a JS app shell)" if state.discovery.docs_rendered_with_browser else ""
         evidence.append(
             EvidenceItem(
-                claim=f"docs source selected: {state.discovery.source_tier_reason}",
+                claim=f"docs source selected: {state.discovery.source_tier_reason}{rendered_note}",
                 source_url=state.discovery.docs_url,
                 snippet=(state.discovery.docs_text or "")[:200].strip(),
             )
         )
     evidence.extend(state.gate.evidence)
+
+    # D-067: None only when GATE never reached its ToS-checking logic at
+    # all (a precondition -- DISCOVERY_FAILED/NO_PUBLIC_API/
+    # CLASSIFY_LOW_CONFIDENCE -- returned first); every other outcome
+    # (AUTO, a real block, or AUTO-with-unverifiable-ToS) always sets it.
+    tos_info = (
+        TosInfo(
+            status=state.gate.tos_status,
+            checked_url=state.gate.tos_checked_url,
+            discovery_method=state.gate.tos_discovery_method,
+        )
+        if state.gate.tos_status is not None
+        else None
+    )
 
     return HandoffArtifact(
         status=state.gate.status,
@@ -163,6 +182,7 @@ def _build_from_gate(state: AppPipelineState, *, credforge_version: str) -> Hand
         api=api,
         credential=credential,
         validation=validation_info,
+        tos=tos_info,
         evidence=evidence,
         completeness_gaps=state.gate.completeness_gaps,
         provenance=Provenance(

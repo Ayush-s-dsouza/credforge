@@ -33,7 +33,7 @@ See DECISIONS.md D-054 for the real bug this replaced.
 
 from ..enums import ApiStyle, PipelineStage, ReasonCode
 from ..models.state import DiscoveryResult
-from ..providers.fetch import FetchException, FetchProvider
+from ..providers.fetch import FetchException, FetchProvider, FetchResult
 from ..providers.llm import Extractor
 from .explain import NULL_EXPLAIN, ExplainEvent, ExplainSink
 from .source_authority import classify_source_tier, describe_tier_match
@@ -65,7 +65,10 @@ def _detect_api_style(docs_url: str, docs_text: str) -> ApiStyle:
     return ApiStyle.UNKNOWN
 
 
-async def _try_fetch_text(url: str, *, fetch: FetchProvider) -> str | None:
+async def _try_fetch_text(url: str, *, fetch: FetchProvider) -> FetchResult | None:
+    # Returns the full FetchResult, not just `.text` -- D-066's
+    # `rendered_with_browser` flag needs to survive into DiscoveryResult
+    # for the artifact to stay auditable about which page required it.
     try:
         result = await fetch.fetch(url, method="GET")
     except FetchException:
@@ -74,7 +77,7 @@ async def _try_fetch_text(url: str, *, fetch: FetchProvider) -> str | None:
         return None
     if len(result.text) < _MIN_USABLE_TEXT_LENGTH:
         return None
-    return result.text
+    return result
 
 
 def _candidate_list(identity_key: str, docs_url_candidates: list[str]) -> list[str]:
@@ -117,9 +120,11 @@ async def discover(
 
     for docs_url in candidates:
         tried.append(docs_url)
-        docs_text = await _try_fetch_text(docs_url, fetch=fetch)
-        if docs_text is None:
+        fetched = await _try_fetch_text(docs_url, fetch=fetch)
+        if fetched is None:
             continue  # unreachable/too short -- try the next candidate
+        docs_text = fetched.text
+        assert docs_text is not None  # guaranteed by _try_fetch_text's own `not result.text` check
 
         extraction = await extractor.extract_discovery(docs_text=docs_text, docs_url=docs_url)
         if not extraction.has_public_api:
@@ -145,6 +150,7 @@ async def discover(
                 source_tier=classify_source_tier(docs_url),
                 source_tier_reason=describe_tier_match(docs_url),
                 api_style=_detect_api_style(docs_url, docs_text),
+                docs_rendered_with_browser=fetched.rendered_with_browser,
             )
             continue
 
@@ -170,6 +176,7 @@ async def discover(
             source_tier=classify_source_tier(docs_url),
             source_tier_reason=describe_tier_match(docs_url),
             api_style=_detect_api_style(docs_url, docs_text),
+            docs_rendered_with_browser=fetched.rendered_with_browser,
         )
 
     if last_no_api_result is not None:

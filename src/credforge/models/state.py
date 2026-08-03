@@ -56,6 +56,14 @@ class DiscoveryResult(BaseModel):
     source_tier: SourceTier | None = None  # set whenever docs_url is set; None otherwise
     source_tier_reason: str | None = None
 
+    # D-066: True when `docs_url`'s content came from a real headless-browser
+    # render, not a plain HTTP fetch -- the plain fetch's extracted text
+    # looked like a client-rendered app shell (near-zero visible text despite
+    # substantial script content), so HttpxFetchProvider re-fetched the same
+    # URL with Playwright. Carried through to EMIT's evidence so the
+    # artifact stays auditable about which pages required this.
+    docs_rendered_with_browser: bool = False
+
     # D-055: REST vs. GraphQL vs. unknown, detected from docs_url/docs_text
     # once discovery settles on a real page. UNKNOWN is the conservative
     # default -- it changes nothing downstream, unlike a confirmed
@@ -97,6 +105,16 @@ class CompletenessGap(BaseModel):
     reason: str
 
 
+# D-067: what GATE actually learned about this vendor's ToS/policy --
+# independent of `status`/`reason_code` below, and always set once GATE
+# reaches its ToS-checking logic at all (None only when a precondition,
+# e.g. DISCOVERY_FAILED/NO_PUBLIC_API/CLASSIFY_LOW_CONFIDENCE, returned
+# before GATE ever got there). "unverifiable" is a real, distinct outcome
+# from either verified state -- it no longer blocks AUTO on its own, see
+# `gate()`'s docstring and DECISIONS.md D-067.
+TosStatus = Literal["verified_permitted", "verified_prohibited", "unverifiable"]
+
+
 class GateResult(BaseModel):
     status: Status
     reason_code: ReasonCode
@@ -105,6 +123,9 @@ class GateResult(BaseModel):
     # lives on their own result objects; EMIT merges all of it together.
     evidence: list[EvidenceItem] = Field(default_factory=list)
     completeness_gaps: list[CompletenessGap] = Field(default_factory=list)
+    tos_status: TosStatus | None = None
+    tos_checked_url: str | None = None
+    tos_discovery_method: str | None = None  # "link_discovery" | "guess_list" | None (never found)
 
 
 class ProvisionResult(BaseModel):
