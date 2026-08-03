@@ -3290,11 +3290,29 @@ idempotency guard, matching how the real ephemeral Railway deployment
 always starts): `provision()` → `status="provisioned"`, `validate()` →
 `status="valid"`, HTTP 200, ~7.7s total, real key vaulted and validated.
 Alpha Vantage is now the first vendor in this project to go from app
-name to a live-acquired, live-validated credential through a real
-`--live` deployment run *and* clear every GATE check for real, not
-mocked -- NASA's earlier live credential (D-052/D-053) predates the
-tier-contradiction and GATE-scoping fixes this chain of work (D-057
-through D-060) exists to correct.
+name to a live-acquired credential through a real `--live` deployment
+run *and* clear every GATE check for real, not mocked -- NASA's earlier
+live credential (D-052/D-053) predates the tier-contradiction and
+GATE-scoping fixes this chain of work (D-057 through D-060) exists to
+correct.
+
+**One more honest, real observation, from the actual deployed button,
+not the direct-script test above:** that direct test supplied
+`validation_endpoint` by hand; a full, real, deployed run of the
+same vendor immediately afterward reached AUTO and acquired a real
+credential identically, but DISCOVER's own real LLM extraction that
+run did not populate `validation_endpoint` at all (grouped with
+`rate_limit_notes`/`pagination_style_hint` in that run's
+`completeness_gaps`) -- so VALIDATE correctly declined to run
+(`validation_failed_unknown`, "no validation_endpoint available"),
+rather than guessing an endpoint. Real, already-documented LLM-extraction
+non-determinism (the same characteristic behind this project's
+run-to-run coverage volatility findings), not a regression from
+anything in this chain of fixes -- credential acquisition is the part
+now reliably real; whether VALIDATE also fires on any given click
+depends on that run's own extraction. The webapp's outcome note for
+Alpha Vantage says so explicitly, rather than promising "validated"
+every time.
 
 **Rejected: leaving the regex matching only the newest wording.** Both
 phrasings are independently, separately confirmed real from this same

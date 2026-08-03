@@ -70,7 +70,13 @@ _RECIPE_DISPLAY_NAMES = {
 # other three are each blocked at a different, diagnosed point -- see
 # OPS.md's recipe-ability section for the real evidence behind each.
 _RECIPE_OUTCOME_NOTES = {
-    "alphavantage.co": "reaches AUTO, credential acquired and validated",
+    # Not "and validated" -- VALIDATE only runs when DISCOVER's own,
+    # per-run LLM extraction happens to populate validation_endpoint from
+    # Alpha Vantage's docs text, which it doesn't do every run (real,
+    # observed non-determinism, unrelated to anything fixed today). A
+    # live run that acquires a credential but skips VALIDATE is a real,
+    # correct outcome, not a bug -- the run log states which happened.
+    "alphavantage.co": "reaches AUTO, credential acquired (validation depends on this run's extraction)",
     "nasa.gov": "JS-rendered docs, stops at discovery",
     "ipinfo.io": "CAPTCHA",
     "openweathermap.org": "CAPTCHA",
