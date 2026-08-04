@@ -4354,3 +4354,53 @@ browser-driving functions (`_reveal_signup_form`, the main
 re-verification against Alpha Vantage, held for this fix per the user's
 explicit instruction ("Hold — I skipped the fixes and one blocks the
 Alpha Vantage test"), is reported separately once run.
+
+### D-072: `auth_required` prompt fix -- D-068 overcorrected on Open-Meteo, requiring evidence of ACQUISITION, not just a key parameter's existence
+
+**Found live, by the user re-checking D-068's own stated exception, not
+newly discovered by testing:** D-068's live verification had already
+reported, plainly, that Open-Meteo classified `auth_scheme=api_key`
+instead of the expected `none` -- at the time treated as "the more
+accurate read of what's actually on the page." The user revisited that
+call: Open-Meteo has NO acquirable credential, and returning `api_key` was
+a genuine overcorrection, not a nuance to accept. Re-fetching Open-Meteo's
+real docs confirmed exactly one relevant mention: *"apikey String No Only
+required to commercial use to access reserved API resources for
+customers. The server URL requires the prefix `customer-`. See pricing for
+more information."* This documents a query PARAMETER's format for
+customers who already somehow have a key -- there is no signup page, no
+"request access" mechanism, no example token anywhere in the docs. Nothing
+describes how a prospective user would actually go acquire one.
+D-068's prompt rule only said "offer a real, optional credential" without
+requiring evidence of an acquisition path, so the LLM over-generalized
+NASA's rate-limit framing ("a free developer key raises the rate limit
+substantially") to any mention of a key existing for higher/commercial
+access, even when -- unlike NASA -- nothing in the text says how to get one.
+
+**The fix: require acquisition evidence, not just credential-format
+evidence.** `AnthropicExtractor.extract_classification`'s prompt
+(`anthropic_extractor.py`) now states the rule explicitly: `auth_scheme`
+may only be classified as a real scheme (not `none`) when the docs show
+*actual evidence a credential can be acquired* -- a signup/registration
+page, a "request a key"/"contact for access" mechanism, or an example
+token/key shown in the docs. Merely documenting a key's parameter format
+is explicitly called out as insufficient on its own. The NASA worked
+example was sharpened to match: rather than citing NASA's rate-limit
+framing (the same framing that over-generalized), it now quotes NASA's
+actual acquisition instruction -- *"you should sign up for a NASA
+developer key"* -- the concrete signal the new rule requires.
+
+**Verified against both vendors named in the user's test, live, not
+assumed:** calling the real, fixed `AnthropicExtractor` directly against
+each vendor's real fetched docs text:
+- **Open-Meteo**: `auth_scheme=none`, `auth_required=none`,
+  confidence=0.75 -- restored to the originally-expected reading, this
+  time for the right reason (evidence-based, not a guess that happened to
+  land right).
+- **NASA**: `auth_scheme=api_key`, `auth_required=optional`,
+  confidence=0.98 -- unaffected by the tightened rule, exactly as required.
+
+**Verified:** 314/314 tests pass (prompt-only change -- no schema, no new
+field, nothing for a unit test to exercise beyond what D-068's existing
+tests already cover: this is a live-LLM-behavior fix, verified the only
+way it can be, against real docs text).
