@@ -76,7 +76,15 @@ _RECIPE_OUTCOME_NOTES = {
     # observed non-determinism, unrelated to anything fixed today). A
     # live run that acquires a credential but skips VALIDATE is a real,
     # correct outcome, not a bug -- the run log states which happened.
-    "alphavantage.co": "reaches AUTO, credential acquired (validation depends on this run's extraction)",
+    # D-075: as of examples/generated_recipes/alphavantage.co.json being
+    # committed, this now runs a DISCOVER_SIGNUP-GENERATED recipe, not the
+    # hand-written one still sitting in signup_recipes.py for comparison --
+    # merge_recipes' reversed precedence picks the generated one whenever
+    # both exist for the same domain.
+    "alphavantage.co": (
+        "reaches AUTO, credential acquired using a DISCOVER_SIGNUP-generated recipe "
+        "(validation depends on this run's extraction)"
+    ),
     "nasa.gov": "JS-rendered docs, stops at discovery",
     "ipinfo.io": "CAPTCHA",
     "openweathermap.org": "CAPTCHA",

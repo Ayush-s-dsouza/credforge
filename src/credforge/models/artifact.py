@@ -90,6 +90,15 @@ class CredentialInfo(BaseModel):
 
     console_url: str | None = None
 
+    # D-075: which SignupRecipe drove this credential's acquisition --
+    # None/None means hand-authored (every hand-written recipe in
+    # signup_recipes.py leaves these unset). Set only when DISCOVER_SIGNUP
+    # generated the recipe, so a viewer can tell "credforge derived this
+    # signup flow itself" apart from "a human verified this by hand"
+    # without reading source code.
+    recipe_generated_by: str | None = None
+    recipe_generated_at: datetime | None = None
+
 
 class ValidationInfo(BaseModel):
     status: str  # "valid" | "invalid" -- mirrors ValidateResult.status

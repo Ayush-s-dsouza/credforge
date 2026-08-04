@@ -4543,3 +4543,82 @@ flagged on this exact vendor after five live attempts this session; the
 unit test reproduces the exact real failure text verbatim and is
 sufficient confirmation without spending a scarce, rate-limited live
 attempt on it.
+
+### D-075: generated recipes now win over hand-authored, and survive a redeploy via a committed examples/ directory
+
+**Found live, by the user auditing the deployed site, not discovered
+through testing:** three verification questions exposed that DISCOVER_SIGNUP's
+whole demonstrated capability -- a real, generated recipe, proven live
+twice this session (Alpha Vantage, unpinned and pinned-URL runs, both
+acquiring a real credential; the pinned run replaying end to end with no
+LLM) -- was invisible to the actual deployed product. (1) the live Railway
+instance was 12 commits behind HEAD and predated `discover_signup.py`
+existing at all; (2) `webapp/main.py`'s only pipeline endpoint never
+imports or calls `discover_signup`; (3) even if it did, `alphavantage.co`'s
+hand-written recipe (`signup_recipes.py`) was still registered, and
+`merge_recipes`' original D-065 rule ("hand_authored always wins")
+meant it would always be chosen over anything DISCOVER_SIGNUP produced.
+Three real, independent gaps, not one.
+
+**This entry covers gaps 1 and 3, the two closeable without new pipeline
+wiring** (gap 2 is D-076, wiring DISCOVER_SIGNUP into the web request
+path itself).
+
+**`merge_recipes`' precedence reversed.** Generated now wins on a key
+collision -- the exact opposite of D-065's original rule. The original
+rule's own reasoning ("a generated recipe never overrides one a human
+verified by hand") assumed a generated recipe was inherently less trusted
+than a hand-written one; that assumption breaks once a generated recipe
+is deliberately reviewed and checked into the repo, the same scrutiny a
+hand-written one already gets before anyone trusts it. And the
+demonstrable claim this project makes -- DISCOVER_SIGNUP's own output is
+what actually runs for a vendor it has generated a recipe for -- is
+simply false, for any vendor with both, under the old rule. `merge_recipes`
+itself is unchanged in shape (still a named, tested function rather than
+an inline dict-merge expression, still takes `generated`/`hand_authored`
+as named arguments) -- only which side of `{**a, **b}` wins was flipped,
+with its docstring and existing test (`test_merge_recipes_hand_authored_always_wins_on_collision`,
+now `test_merge_recipes_generated_wins_on_collision`) updated to match.
+
+**A second generated-recipe source, because Railway's filesystem doesn't
+survive a redeploy.** `factory.py`'s live branch previously read generated
+recipes from exactly one place: `settings.data_dir` -- fine for a local
+CLI run, useless in production, since that directory lives on the
+container's ephemeral disk and is gone the moment the container restarts
+(confirmed directly: `/api/status`'s counters reset to 0 immediately after
+the Stage 1 redeploy). `_COMMITTED_EXAMPLES_DIR` (`Path(__file__).resolve().parents[3]
+/ "examples"`, mirroring `webapp/main.py`'s own `REPO_ROOT` computation)
+points at `examples/`, which the Dockerfile already `COPY`s into the image
+at build time -- a file placed there survives every redeploy for free,
+the same way `examples/seed_batch/` and `examples/nasa_live_credential.json`
+already do. `examples/generated_recipes/alphavantage.co.json` is the real
+output of this session's pinned-URL DISCOVER_SIGNUP run against Alpha
+Vantage -- not a hand-typed stand-in -- chosen specifically because it's
+the one of the two real generation runs this session with a FULLY
+verified successful replay (no LLM, real credential extracted cleanly,
+post-D-074-fix). `factory.py` now merges both generated sources
+(committed winning over ephemeral on collision -- a deliberately-reviewed
+recipe over a same-process scratch one) before handing the result to
+`merge_recipes` against `LIVE_SIGNUP_RECIPES`.
+
+**Provenance threaded all the way to the artifact, not just inferred from
+which selectors happen to match.** `ProvisionOutcome` (new
+`recipe_generated_by`/`recipe_generated_at` fields, mirroring
+`SignupRecipe`'s own) -> `ProvisionResult` -> `CredentialInfo` on the
+final `HandoffArtifact`. `PlaywrightBrowserDriver.signup_and_create_app`
+now builds every outcome (not just the success one -- a failed attempt
+still records which recipe drove it) through a small local `_outcome()`
+closure that stamps the matched recipe's provenance on automatically,
+rather than repeating two kwargs at all seven return sites by hand. The
+webapp surfaces it distinctly, not just as inert JSON: a green "GENERATED
+RECIPE -- not hand-written" banner appears whenever `credential.recipe_generated_by`
+is set, the same visual pattern already used for the existing "credential
+block is MOCKED" warning. `/api/status`'s Alpha Vantage outcome note was
+updated to say so up front, before a viewer ever clicks run.
+
+**Verified end-to-end, live, not just unit-tested:** `build_providers(settings,
+live=True)` -- the exact function both the CLI and the webapp call --
+resolves `alphavantage.co` to the recipe with `generated_by="discover_signup"`,
+confirmed by direct inspection of the constructed `PlaywrightBrowserDriver`'s
+recipe dict. 319/319 tests pass (1 changed: `merge_recipes`' precedence
+test now asserts the reversed behavior).

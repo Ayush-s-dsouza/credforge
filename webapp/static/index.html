@@ -282,6 +282,9 @@ async function runApp() {
           if (art.credential && art.credential.mocked) {
             appendLine(`<span class="warn">credential block below is MOCKED -- this run's mode banner already said credential acquisition was not attempted; PROVISION still ran a mock signup for this AUTO app (matching the CLI's own default behavior), and nothing here is a real vaulted secret.</span>`);
           }
+          if (art.credential && art.credential.recipe_generated_by) {
+            appendLine(`<strong style="color:#059669">GENERATED RECIPE -- not hand-written.</strong> This credential was acquired using a signup recipe DISCOVER_SIGNUP wrote itself (generated_at ${escapeHtml(art.credential.recipe_generated_at || 'unknown')}), not one a human read the vendor's page and typed in.`);
+          }
           document.getElementById('run-artifact').textContent = JSON.stringify(art, null, 2);
           document.getElementById('run-artifact').style.display = 'block';
           if (art.status === 'HITL') renderHitl(document.getElementById('run-hitl'), art);

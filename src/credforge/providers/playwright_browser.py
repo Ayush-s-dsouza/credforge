@@ -373,6 +373,15 @@ class PlaywrightBrowserDriver:
                 failure_reason=f"no per-vendor signup recipe registered for {domain!r}",
             )
 
+        # D-075: every ProvisionOutcome built from here on -- success or
+        # failure -- carries which recipe drove the attempt, so a viewer
+        # never has to guess whether a hand-written or a DISCOVER_SIGNUP-
+        # generated recipe was actually used.
+        def _outcome(**kwargs) -> ProvisionOutcome:
+            return ProvisionOutcome(
+                recipe_generated_by=recipe.generated_by, recipe_generated_at=recipe.generated_at, **kwargs
+            )
+
         from playwright.async_api import async_playwright
 
         steps: list[ProvisionStepResult] = []
@@ -399,7 +408,7 @@ class PlaywrightBrowserDriver:
                         )
                     except Exception as exc:
                         steps.append(ProvisionStepResult(step="reveal_signup_form", success=False, detail=str(exc)))
-                        return ProvisionOutcome(
+                        return _outcome(
                             success=False,
                             credential_type=CredentialType.NONE,
                             steps=steps,
@@ -423,7 +432,7 @@ class PlaywrightBrowserDriver:
                                 detail=f"no visible form field appeared within {FORM_READY_TIMEOUT_MS / 1000:.0f}s",
                             )
                         )
-                        return ProvisionOutcome(
+                        return _outcome(
                             success=False,
                             credential_type=CredentialType.NONE,
                             steps=steps,
@@ -490,7 +499,7 @@ class PlaywrightBrowserDriver:
                             detail="recipe has no configured extraction mechanism for this credential_type",
                         )
                     )
-                    return ProvisionOutcome(
+                    return _outcome(
                         success=False,
                         credential_type=CredentialType.NONE,
                         steps=steps,
@@ -519,7 +528,7 @@ class PlaywrightBrowserDriver:
                                 detail="regex did not match the email body",
                             )
                         )
-                        return ProvisionOutcome(
+                        return _outcome(
                             success=False,
                             credential_type=CredentialType.NONE,
                             steps=steps,
@@ -575,7 +584,7 @@ class PlaywrightBrowserDriver:
                                         detail="api_key_page_regex did not match the page content",
                                     )
                                 )
-                                return ProvisionOutcome(
+                                return _outcome(
                                     success=False,
                                     credential_type=CredentialType.NONE,
                                     steps=steps,
@@ -586,7 +595,7 @@ class PlaywrightBrowserDriver:
                             raw_api_credential["api_key"] = page_text
                     steps.append(ProvisionStepResult(step="extract_credential", success=True))
 
-                return ProvisionOutcome(
+                return _outcome(
                     success=True,
                     credential_type=recipe.credential_type,
                     raw_api_credential=raw_api_credential,
@@ -596,7 +605,7 @@ class PlaywrightBrowserDriver:
                 )
             except Exception as exc:
                 steps.append(ProvisionStepResult(step="browser_automation", success=False, detail=str(exc)))
-                return ProvisionOutcome(
+                return _outcome(
                     success=False, credential_type=CredentialType.NONE, steps=steps, failure_reason=str(exc)
                 )
             finally:

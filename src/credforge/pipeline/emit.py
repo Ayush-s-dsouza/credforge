@@ -114,6 +114,8 @@ def _build_from_gate(state: AppPipelineState, *, credforge_version: str) -> Hand
             client_secret_ref=state.provision.client_secret_ref,
             bearer_token_ref=state.provision.bearer_token_ref,
             console_url=state.provision.console_url,
+            recipe_generated_by=state.provision.recipe_generated_by,
+            recipe_generated_at=state.provision.recipe_generated_at,
         )
 
     validation_info: ValidationInfo | None = None

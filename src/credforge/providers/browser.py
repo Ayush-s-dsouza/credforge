@@ -5,6 +5,7 @@ browser. PlaywrightBrowserDriver (Stage 5, --live only) drives a real
 browser. Both satisfy this same Protocol.
 """
 
+from datetime import datetime
 from typing import Protocol
 
 from pydantic import BaseModel
@@ -37,6 +38,18 @@ class ProvisionOutcome(BaseModel):
     console_url: str | None = None
     steps: list[ProvisionStepResult] = []
     failure_reason: str | None = None
+
+    # D-075: which recipe drove this attempt, mirrored straight off
+    # `SignupRecipe.generated_by`/`generated_at` (None/None means
+    # hand-authored -- every hand-written recipe in signup_recipes.py
+    # leaves these unset). Set once a recipe is actually found, so even a
+    # FAILED attempt records which recipe was used, not just successes.
+    # Threaded through ProvisionResult and into the artifact's
+    # CredentialInfo so a viewer can tell "DISCOVER_SIGNUP wrote this
+    # recipe" apart from "a human verified this by hand" without reading
+    # source code -- see DECISIONS.md D-075.
+    recipe_generated_by: str | None = None
+    recipe_generated_at: datetime | None = None
 
 
 class BrowserDriver(Protocol):

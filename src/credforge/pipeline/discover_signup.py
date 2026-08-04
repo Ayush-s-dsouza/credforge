@@ -720,13 +720,23 @@ def save_generated_recipe(data_dir: Path, domain: str, recipe: SignupRecipe) -> 
 def merge_recipes(
     generated: dict[str, SignupRecipe], hand_authored: dict[str, SignupRecipe]
 ) -> dict[str, SignupRecipe]:
-    """`hand_authored` always wins on a key collision -- a generated recipe
-    never overrides one a human already read the vendor's real DOM and
-    verified by hand. Extracted as its own pure function (rather than an
+    """`generated` now wins on a key collision -- reversed from this
+    function's original D-065 rule ("hand_authored always wins," a
+    generated recipe never overriding one a human already verified by
+    hand). Superseded by D-075: a generated recipe only ever reaches this
+    function's `generated` argument from one of two sources -- a fresh,
+    this-process run, or the committed `examples/generated_recipes/`
+    directory a human deliberately reviewed and checked in, the same
+    scrutiny a hand-written recipe already gets before it's trusted. The
+    demonstrable claim this project makes is that DISCOVER_SIGNUP's own
+    output is what actually runs for a vendor it has generated a recipe
+    for -- a hand-written recipe silently winning over a committed
+    generated one would falsify that claim for any vendor with both (e.g.
+    Alpha Vantage). Extracted as its own pure function (rather than an
     inline dict-merge expression in factory.py) specifically so this
     precedence rule has a direct unit test, not just an implicit property
     of merge order in a two-line expression."""
-    return {**generated, **hand_authored}
+    return {**hand_authored, **generated}
 
 
 def load_generated_recipes(data_dir: Path) -> dict[str, SignupRecipe]:

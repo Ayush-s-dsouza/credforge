@@ -161,6 +161,12 @@ class ProvisionResult(BaseModel):
     console_url: str | None = None
     steps: list[ProvisionStepResult] = Field(default_factory=list)
 
+    # D-075: which recipe drove a successful provision -- None/None means
+    # hand-authored (or, for a mocked/already-provisioned result, simply
+    # not tracked). Mirrors ProvisionOutcome's own fields straight through.
+    recipe_generated_by: str | None = None
+    recipe_generated_at: datetime | None = None
+
 
 class ValidateResult(BaseModel):
     # "invalid" covers every VALIDATION_FAILED_* reason -- the specific one

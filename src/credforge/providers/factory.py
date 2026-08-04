@@ -16,6 +16,7 @@ neither is hardcoded as "the" provider.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..config import Settings
 from ..net.rate_limiter import DomainRateLimiter
@@ -30,6 +31,17 @@ from .llm import Extractor
 from .mock_browser import MockBrowserDriver
 from .mock_email import MockEmailProvider
 from .search import SearchProvider
+
+
+# D-075: `examples/` is checked into the repo (the Dockerfile COPYs it
+# into the image at build time -- unlike `settings.data_dir`, which lives
+# on Railway's ephemeral container filesystem and is gone on every
+# redeploy). A generated recipe committed to `examples/generated_recipes/`
+# is the one, deliberate way to make DISCOVER_SIGNUP's output survive a
+# redeploy without re-generating it live every time. `parents[3]` from
+# this file (providers -> credforge -> src -> repo root) mirrors the same
+# REPO_ROOT computation webapp/main.py already does for itself.
+_COMMITTED_EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples"
 
 
 @dataclass
@@ -93,12 +105,22 @@ def build_providers(settings: Settings, *, live: bool = False) -> ProviderBundle
         # D-065 (DISCOVER_SIGNUP): a generated recipe is loaded from disk and
         # merged in here -- the same PlaywrightBrowserDriver, same
         # `self._recipes.get(domain)` lookup, zero special-casing between a
-        # recipe a human wrote and one DISCOVER_SIGNUP generated. Merge
-        # order matters: LIVE_SIGNUP_RECIPES (hand-authored, human-verified)
-        # is applied SECOND so it always wins if the same domain somehow has
-        # both -- a generated recipe never overrides one a human already
-        # checked by hand.
-        recipes = merge_recipes(load_generated_recipes(settings.data_dir), LIVE_SIGNUP_RECIPES)
+        # recipe a human wrote and one DISCOVER_SIGNUP generated.
+        #
+        # D-075: two generated-recipe sources, not one. `settings.data_dir`
+        # is THIS process's own ephemeral output (gone on redeploy --
+        # Railway's filesystem doesn't persist); `_COMMITTED_EXAMPLES_DIR`
+        # is the checked-in copy that survives redeploys, populated only by
+        # a human deliberately committing a real DISCOVER_SIGNUP run's
+        # output. Committed wins over ephemeral on collision (a
+        # deliberately-reviewed recipe over a same-run scratch one), and
+        # merge_recipes' own (now-reversed) precedence makes generated
+        # (either source) win over hand-authored -- see its docstring.
+        generated_recipes = {
+            **load_generated_recipes(settings.data_dir),
+            **load_generated_recipes(_COMMITTED_EXAMPLES_DIR),
+        }
+        recipes = merge_recipes(generated_recipes, LIVE_SIGNUP_RECIPES)
         browser = PlaywrightBrowserDriver(recipes=recipes)
     else:
         email = MockEmailProvider(alias_domain=settings.email_alias_domain)

@@ -194,4 +194,6 @@ async def provision(
         bearer_token_ref=bearer_token_ref,
         console_url=outcome.console_url,
         steps=outcome.steps,
+        recipe_generated_by=outcome.recipe_generated_by,
+        recipe_generated_at=outcome.recipe_generated_at,
     )

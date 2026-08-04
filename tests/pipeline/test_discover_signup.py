@@ -489,11 +489,16 @@ def test_load_generated_recipes_skips_a_corrupted_file_without_raising(tmp_path:
     assert "broken" not in loaded
 
 
-def test_merge_recipes_hand_authored_always_wins_on_collision() -> None:
-    generated = {"example.com": _sample_recipe(email_field_selector="[name='generated-guess']")}
-    hand_authored = {"example.com": _sample_recipe(email_field_selector="#hand-verified")}
+def test_merge_recipes_generated_wins_on_collision() -> None:
+    # D-075: reversed from the original D-065 rule. A generated recipe
+    # that reaches this function has already been through the same
+    # review a hand-written one gets (this-process fresh output, or a
+    # human-committed examples/generated_recipes/ file) -- it should win,
+    # so DISCOVER_SIGNUP's own output is demonstrably what actually runs.
+    generated = {"example.com": _sample_recipe(email_field_selector="[name='generated']")}
+    hand_authored = {"example.com": _sample_recipe(email_field_selector="#hand-written")}
     merged = merge_recipes(generated, hand_authored)
-    assert merged["example.com"].email_field_selector == "#hand-verified"
+    assert merged["example.com"].email_field_selector == "[name='generated']"
 
 
 def test_merge_recipes_keeps_generated_entries_with_no_hand_authored_collision() -> None:
