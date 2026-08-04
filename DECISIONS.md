@@ -4181,3 +4181,94 @@ its cost to however long the specific page actually needs, capped.
 same way its existing purpose-mapping tests are structured). Live
 re-verification against NASA with the fix applied is the next step,
 reported separately once run.
+
+### D-070: `identify_reveal_trigger` -- some signup widgets don't render on any timer at all; they're gated behind a click, and D-069's poll alone can't find that out
+
+**Found live, not designed speculatively -- and found by DISPROVING D-069's
+own premise, not by assuming it:** re-running the pinned-harness NASA
+generation with D-069's fix in place reached the same
+`SIGNUP_FORM_NOT_RENDERED` outcome, timing out at the full 15s cap. Rather
+than assume the cap was simply too short and grind on a bigger number, a
+direct diagnostic (`scripts/scratch_nasa_render_timing.py`) polled the same
+page every 2s for 38 seconds -- 2.5x D-069's cap -- logging `#user_email`
+presence, `input[type=email]` presence, iframe count, and total input
+count at each step. Every single sample was identical: 2 inputs (the
+site's own search boxes), 0 iframes, no email field, for the entire 38
+seconds. D-069's premise -- "content arriving asynchronously, eventually,
+on some timer" -- was simply false for this page. A follow-up diagnostic
+(`scripts/scratch_nasa_click_diag.py`) dumped every visible clickable
+element's text/href and found the real mechanism: `<a href="#signUp"
+class="usa-nav-link">Generate API Key</a>` -- a nav link whose click
+handler mounts the widget. api.nasa.gov's signup form isn't slow. It's
+gated behind a click, a structurally different failure than either D-066
+(a JS shell, fixed by rendering) or D-069 (a timing race, fixed by
+waiting).
+
+**The mechanism: ask the LLM which visible element to click, not a
+hardcoded keyword list.** Reusing a `sign.?up|register|get.?started`-style
+regex (the same shape `_extract_signup_candidate_links`'s link discovery
+already uses to find signup PAGES) was explicitly rejected for the same
+reason D-065 already established for form-field classification: a fixed
+keyword list is a hand-maintained artifact that generalizes only until the
+next vendor phrases its own trigger differently ("Get Your Key", "Try It
+Free", "Start Building" are all real phrasings that a fixed list would
+have to keep chasing). Instead, once `wait_for_signup_form_ready` has
+already timed out, `_gather_reveal_candidates` collects every visible
+`<a>`/`<button>` with real text (`_REVEAL_CANDIDATE_JS`, a new DOM query --
+`_reduce_dom`'s existing `_DOM_REDUCTION_JS` deliberately never queries
+`<a>` at all, since it's scoped to form controls), and
+`identify_reveal_trigger` (`SignupFormAnalyzer`, implemented only by
+`AnthropicSignupFormAnalyzer`, same Protocol-separation reasoning as
+`classify_signup_form`) asks the LLM which single element, if any,
+plausibly reveals a signup/API-key form -- explicitly instructed to answer
+`null` rather than guess at the least-bad candidate when nothing
+plausible exists. `_reveal_signup_form` (`discover_signup.py`) then
+clicks the LLM's answer and re-polls with the same, unmodified
+`wait_for_signup_form_ready`, gathering candidates fresh each iteration
+(in case the first click was itself a navigation step exposing a more
+specific trigger), capped at `_MAX_REVEAL_ATTEMPTS = 2` per the user's
+explicit "don't grind" instruction -- a third guess buys little once two
+LLM-identified clicks haven't worked, and the honest
+`SIGNUP_FORM_NOT_RENDERED` outcome (now including which selectors were
+tried) is a better result than an unbounded search.
+
+**Only ever tried after the passive wait has already failed, never
+pre-emptively:** the overwhelming majority of vendors' forms need no
+interaction at all (this is the FIRST time in six-plus live generation
+attempts across this project that a click-gated widget has been found),
+so paying for an extra LLM call and a DOM re-query on every single
+generation run -- for a case that's rare by construction -- would be
+waste, not thoroughness.
+
+**Recorded in the recipe, replayed verbatim, no LLM at replay time:**
+`SignupRecipe.reveal_click_selector: str | None` (new field,
+`playwright_browser.py`) is independent of `requires_async_form_render` --
+a widget can need a click, a wait afterward, both, or neither, and the two
+facts are learned and stored separately. `signup_and_create_app` clicks
+`reveal_click_selector` (if set) before checking
+`requires_async_form_render`, mirroring generation's own click-then-wait
+order. A click failure (bad/stale selector, element gone) produces the
+same `SIGNUP_FORM_NOT_RENDERED:`-prefixed `failure_reason` D-069
+established, keeping this failure mode identifiable in logs/reports
+alongside the timing-race case it's siblings with, not a new unrelated
+error shape.
+
+**Rejected: encoding the trigger as a fixed selector once discovered for
+NASA, and calling it done.** That would be exactly the vendor-specific
+hardcoding this generator exists to eliminate -- indistinguishable from
+just hand-authoring NASA's recipe a second time under a different name.
+The mechanism has to generalize to a vendor DISCOVER_SIGNUP has never
+seen, which is why the LLM identifies the trigger fresh on the page it's
+actually looking at, the same standard already held for field
+classification and credential-anchor identification.
+
+**Verified:** 309/309 tests pass (8 new:
+`_build_reveal_selector`'s name/id/href/text-fallback precedence,
+including the real NASA shape -- `<a href="#signUp">`, no name, no id --
+and a quote-escaping case for the text fallback; `reveal_click_selector`
+defaulting to `None` and being recorded when set, mirroring D-069's own
+`requires_async_form_render` test pair). Live re-verification against
+NASA, and the ten-vendor batch the user specified to validate this
+generalizes beyond the one vendor that motivated it, is reported
+separately once run -- per the user's explicit instruction not to
+overfit a general mechanism to n=1.

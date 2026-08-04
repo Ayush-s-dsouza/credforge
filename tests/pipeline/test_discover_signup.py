@@ -7,6 +7,7 @@ from credforge.pipeline.discover_signup import (
     HardStopError,
     _build_anchored_regex,
     _build_recipe_from_classification,
+    _build_reveal_selector,
     _build_selector,
     _check_llm_hard_stops,
     _check_structural_captcha_fields,
@@ -52,6 +53,40 @@ def test_build_selector_falls_back_to_id_when_no_name() -> None:
 
 def test_build_selector_falls_back_to_tag_type_when_neither_present() -> None:
     assert _build_selector({"tag": "input", "name": None, "id": None, "type": "submit"}) == "input[type='submit']"
+
+
+# --- _build_reveal_selector: same name/id precedence, plus href/text ----
+# fallbacks a plain <a> (no name, no id -- NASA's own "Generate API Key"
+# link is exactly this shape) needs that _build_selector never does.
+
+
+def test_build_reveal_selector_prefers_name_over_id() -> None:
+    assert _build_reveal_selector({"tag": "a", "name": "cta", "id": "x", "href": "/signup"}) == "[name='cta']"
+
+
+def test_build_reveal_selector_falls_back_to_id_when_no_name() -> None:
+    assert _build_reveal_selector({"tag": "a", "name": None, "id": "signup-link", "href": "/signup"}) == "#signup-link"
+
+
+def test_build_reveal_selector_falls_back_to_href_when_no_name_or_id() -> None:
+    # The real NASA case: <a href="#signUp">Generate API Key</a>, no name, no id.
+    raw = {"tag": "a", "name": None, "id": None, "href": "#signUp", "text": "Generate API Key"}
+    assert _build_reveal_selector(raw) == "a[href='#signUp']"
+
+
+def test_build_reveal_selector_falls_back_to_text_when_no_name_id_or_href() -> None:
+    raw = {"tag": "button", "name": None, "id": None, "href": None, "text": "Get Started"}
+    assert _build_reveal_selector(raw) == 'button:has-text("Get Started")'
+
+
+def test_build_reveal_selector_ignores_a_javascript_pseudo_href() -> None:
+    raw = {"tag": "a", "name": None, "id": None, "href": "javascript:void(0)", "text": "Sign Up"}
+    assert _build_reveal_selector(raw) == 'a:has-text("Sign Up")'
+
+
+def test_build_reveal_selector_escapes_quotes_in_text_fallback() -> None:
+    raw = {"tag": "a", "name": None, "id": None, "href": None, "text": 'Get your "free" key'}
+    assert _build_reveal_selector(raw) == 'a:has-text("Get your \\"free\\" key")'
 
 
 # --- structural payment-field hard stop (independent of the LLM) --------
@@ -218,6 +253,33 @@ def test_build_recipe_records_requires_async_form_render_when_the_form_needed_a_
         requires_email_verification=False, requires_async_form_render=True,
     )
     assert recipe.requires_async_form_render is True
+
+
+def test_build_recipe_defaults_reveal_click_selector_to_none() -> None:
+    elements = [_element(selector="[name='email']", name="email", required=True)]
+    classification = _classification(field_map=[ClassifiedField(selector="[name='email']", purpose="email")])
+    recipe = _build_recipe_from_classification(
+        classification, elements,
+        domain="example.com", docs_url="https://example.com/docs", signup_url="https://example.com/signup",
+        credential_type=CredentialType.API_KEY, page_regex=r"key:\s*(\S+)", email_regex=None,
+        requires_email_verification=False,
+    )
+    assert recipe.reveal_click_selector is None
+
+
+def test_build_recipe_records_reveal_click_selector_when_a_trigger_was_needed() -> None:
+    # NASA's widget doesn't render on any timer -- it needed an LLM-
+    # identified click on its "Generate API Key" link first (D-070). That
+    # selector is recorded so replay reproduces the click, not just the wait.
+    elements = [_element(selector="[name='email']", name="email", required=True)]
+    classification = _classification(field_map=[ClassifiedField(selector="[name='email']", purpose="email")])
+    recipe = _build_recipe_from_classification(
+        classification, elements,
+        domain="example.com", docs_url="https://example.com/docs", signup_url="https://example.com/signup",
+        credential_type=CredentialType.API_KEY, page_regex=r"key:\s*(\S+)", email_regex=None,
+        requires_email_verification=False, reveal_click_selector="a[href='#signUp']",
+    )
+    assert recipe.reveal_click_selector == "a[href='#signUp']"
 
 
 def test_build_recipe_keeps_password_and_password_confirm_as_separate_selectors() -> None:

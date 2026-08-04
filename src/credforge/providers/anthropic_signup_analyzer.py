@@ -20,7 +20,13 @@ except ImportError as exc:  # pragma: no cover -- exercised only without the opt
         "run `pip install credforge[llm]`"
     ) from exc
 
-from .signup_generation import CredentialLocationFinding, FormElement, SignupFormClassification
+from .signup_generation import (
+    CredentialLocationFinding,
+    FormElement,
+    RevealCandidate,
+    RevealTriggerClassification,
+    SignupFormClassification,
+)
 
 _MODEL = "claude-sonnet-5"
 
@@ -107,4 +113,36 @@ class AnthropicSignupFormAnalyzer:
             output_format=CredentialLocationFinding,
         )
         self._record("locate_credential", response)
+        return response.parsed_output
+
+    async def identify_reveal_trigger(
+        self, *, url: str, candidates: list[RevealCandidate]
+    ) -> RevealTriggerClassification:
+        candidates_json = "\n".join(c.model_dump_json() for c in candidates)
+        response = await self._client.messages.parse(
+            model=_MODEL,
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f"No signup or API-key request form fields were found on this vendor's page "
+                        f"({url}) after loading and waiting for asynchronous content. Some signup widgets "
+                        "only render after a specific link or button is clicked (e.g. a 'Sign Up' or "
+                        "'Generate API Key' nav link that reveals an embedded form on click, rather than "
+                        "on a timer). Below is every visible, clickable link/button on the page, one JSON "
+                        "object per line: its selector, tag, visible text, and href (if any).\n\n"
+                        "Which single element, if clicked, is MOST likely to reveal a signup or API-key "
+                        "request form? Only answer with an element that plausibly leads to account or "
+                        "API-key creation -- not general navigation, search, documentation links, social "
+                        "media, or unrelated site sections. If nothing here plausibly reveals a signup "
+                        "form, set selector to null rather than guessing at the least-bad option. Give "
+                        "your confidence (0-1).\n\n"
+                        f"--- clickable elements ---\n{candidates_json[:_MAX_CONTENT_CHARS]}"
+                    ),
+                }
+            ],
+            output_format=RevealTriggerClassification,
+        )
+        self._record("identify_reveal_trigger", response)
         return response.parsed_output

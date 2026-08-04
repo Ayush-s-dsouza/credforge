@@ -70,6 +70,30 @@ class SignupFormClassification(BaseModel):
     confidence: float
 
 
+class RevealCandidate(BaseModel):
+    """A visible, clickable link/button found on a page where no signup
+    form fields were present yet. Distinct from `FormElement`: this
+    describes navigational/action elements (their visible text and href
+    matter), not form controls (their placeholder/label/required attributes
+    don't apply here -- `<a>` tags in particular never appear in
+    `FormElement`, which is scoped to `input, select, textarea, button`).
+    See DECISIONS.md D-070."""
+
+    selector: str
+    tag: Literal["a", "button"]
+    text: str
+    href: str | None = None
+
+
+class RevealTriggerClassification(BaseModel):
+    # None means no visible element plausibly leads to a signup/API-key
+    # form -- e.g. a page that genuinely has no such flow at all. Never a
+    # guess forced onto the least-bad candidate.
+    selector: str | None
+    reasoning: str | None = None
+    confidence: float
+
+
 class CredentialLocationFinding(BaseModel):
     found: bool
     location: Literal["page", "email", "neither"]
@@ -90,3 +114,7 @@ class SignupFormAnalyzer(Protocol):
     async def classify_signup_form(self, *, url: str, elements: list[FormElement]) -> SignupFormClassification: ...
 
     async def locate_credential(self, *, context_label: str, content: str) -> CredentialLocationFinding: ...
+
+    async def identify_reveal_trigger(
+        self, *, url: str, candidates: list[RevealCandidate]
+    ) -> RevealTriggerClassification: ...

@@ -267,6 +267,16 @@ class SignupRecipe(BaseModel):
     # before attempting to fill any field, same as generation did.
     requires_async_form_render: bool = False
 
+    # D-070: set when this vendor's signup widget doesn't render passively
+    # at all -- it mounts only after a specific link/button is clicked
+    # (found live, NASA's own "Generate API Key" nav link). None means no
+    # click was needed to see the form. When set, replay clicks this
+    # selector before checking `requires_async_form_render` -- the two are
+    # independent facts (a widget can need a click, a wait afterward, both,
+    # or neither) learned once at generation time and replayed verbatim,
+    # never re-derived.
+    reveal_click_selector: str | None = None
+
     # Provenance: unset for every hand-authored recipe in this file (all
     # four were read and written by a human directly). Set only by
     # DISCOVER_SIGNUP, so a recipe's origin is always visible just by
@@ -315,6 +325,31 @@ class PlaywrightBrowserDriver:
                 await page.goto(developer_portal_url)
                 await dismiss_cookie_banner(page)
                 steps.append(ProvisionStepResult(step="navigate_to_signup", success=True))
+
+                if recipe.reveal_click_selector:
+                    # D-070: this recipe's own generation run found the
+                    # form doesn't render passively at all -- it only
+                    # mounts after this specific element is clicked (found
+                    # live, NASA's own "Generate API Key" nav link).
+                    try:
+                        await page.click(recipe.reveal_click_selector, timeout=5_000)
+                        steps.append(
+                            ProvisionStepResult(
+                                step="reveal_signup_form", success=True,
+                                detail=f"clicked {recipe.reveal_click_selector!r}",
+                            )
+                        )
+                    except Exception as exc:
+                        steps.append(ProvisionStepResult(step="reveal_signup_form", success=False, detail=str(exc)))
+                        return ProvisionOutcome(
+                            success=False,
+                            credential_type=CredentialType.NONE,
+                            steps=steps,
+                            failure_reason=(
+                                f"SIGNUP_FORM_NOT_RENDERED: recipe's reveal_click_selector "
+                                f"{recipe.reveal_click_selector!r} could not be clicked"
+                            ),
+                        )
 
                 if recipe.requires_async_form_render:
                     # D-069: this recipe's own generation run needed to

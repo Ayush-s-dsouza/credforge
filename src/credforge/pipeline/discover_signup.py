@@ -74,7 +74,13 @@ from ..providers.playwright_browser import (
     dismiss_cookie_banner,
     wait_for_signup_form_ready,
 )
-from ..providers.signup_generation import ClassifiedField, FormElement, SignupFormClassification
+from ..providers.signup_generation import (
+    ClassifiedField,
+    FormElement,
+    RevealCandidate,
+    SignupFormAnalyzer,
+    SignupFormClassification,
+)
 from ..redaction import register_secret
 from ..registry.store import AppendOnlyRegistry
 from ..utils.domains import registrable_domain
@@ -117,6 +123,11 @@ class DiscoverSignupResult(BaseModel):
     intended_fills: dict[str, str] = Field(default_factory=dict)
     required_checkboxes: list[str] = Field(default_factory=list)
     submit_selector: str | None = None
+    # D-070: set whenever the signup widget didn't render passively and an
+    # LLM-identified click was needed to reveal it -- surfaced here (not
+    # just in the emitted recipe) so a dry-run report shows the reveal
+    # decision before anything ever goes live.
+    reveal_click_selector: str | None = None
 
     # Live only, once a credential was actually extracted and vaulted.
     credential_vault_ref: str | None = None
@@ -363,6 +374,106 @@ async def _reduce_dom(page) -> list[FormElement]:
     return elements
 
 
+# --- Step 2b: reveal an interaction-gated signup widget -------------------
+#
+# D-070: found live against NASA, after D-069's readiness poll was verified
+# NOT to be the whole story -- api.nasa.gov's real signup widget doesn't
+# render on ANY timer at all (a direct 38-second poll, well past D-069's
+# 15s cap, showed zero DOM change). It only mounts after its own "Generate
+# API Key" nav link (href="#signUp") is clicked. Structurally different
+# from D-069's problem (a timing race, fixed by waiting): this is an
+# interaction gate, fixed by finding and clicking the right trigger.
+#
+# Deliberately NOT a hardcoded keyword list ("sign up"|"register"|"get
+# started"...) -- that's exactly the kind of hand-maintained artifact that
+# generalizes only until the next vendor phrases it differently, the same
+# reasoning D-065 already applies to form-field classification. The LLM is
+# shown every visible clickable element's real text/href and asked which
+# one, if any, plausibly reveals a signup form -- same "let the model make
+# the judgment call code can't reliably encode" pattern as
+# `classify_signup_form`, applied one step earlier.
+
+_REVEAL_CANDIDATE_JS = """
+() => {
+  const out = [];
+  const els = document.querySelectorAll('a, button');
+  for (const el of els) {
+    if (el.disabled) continue;
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    if (rect.width === 0 || rect.height === 0 || style.visibility === 'hidden' || style.display === 'none') continue;
+    const text = (el.innerText || el.textContent || '').trim();
+    if (!text) continue;
+    const tag = el.tagName.toLowerCase();
+    out.push({
+      tag, text: text.slice(0, 80),
+      id: el.getAttribute('id'), name: el.getAttribute('name'), href: el.getAttribute('href'),
+    });
+  }
+  return out;
+}
+"""
+
+_MAX_REVEAL_ATTEMPTS = 2
+
+
+def _build_reveal_selector(raw: dict) -> str:
+    """Same name/id-preferred precedence as `_build_selector`, extended
+    with two fallbacks `_build_selector` doesn't need: a real `<a>` often
+    has neither name nor id (NASA's own "Generate API Key" link is exactly
+    this shape), so href and finally visible text (via Playwright's own
+    `:has-text()` selector extension, not plain CSS) keep every candidate
+    uniquely clickable rather than falling through to a bare, ambiguous
+    `tag` selector that could match dozens of elements."""
+    name = raw.get("name")
+    if name:
+        return f"[name='{name}']"
+    id_ = raw.get("id")
+    if id_:
+        return f"#{id_}"
+    href = raw.get("href")
+    if href and not href.startswith("javascript:"):
+        return f"{raw['tag']}[href='{href}']"
+    text = (raw.get("text") or "").replace('"', '\\"')
+    return f'{raw["tag"]}:has-text("{text}")'
+
+
+async def _gather_reveal_candidates(page) -> list[RevealCandidate]:
+    raw_elements = await page.evaluate(_REVEAL_CANDIDATE_JS)
+    return [
+        RevealCandidate(selector=_build_reveal_selector(raw), tag=raw["tag"], text=raw["text"], href=raw.get("href"))
+        for raw in raw_elements
+    ]
+
+
+async def _reveal_signup_form(page, *, analyzer: SignupFormAnalyzer, url: str) -> tuple[bool, list[str], bool]:
+    """Called only once `wait_for_signup_form_ready` has already timed out.
+    Tries at most `_MAX_REVEAL_ATTEMPTS` LLM-identified clicks, re-polling
+    after each -- gathers candidates fresh every iteration in case the
+    first click was itself a navigation step that exposed a more specific
+    trigger. Returns (found, [selectors clicked, in order], whether the
+    successful post-click check itself needed to poll rather than seeing
+    the field immediately); an empty selector list means either no
+    plausible candidate existed or the LLM found none."""
+    clicked: list[str] = []
+    for _ in range(_MAX_REVEAL_ATTEMPTS):
+        candidates = await _gather_reveal_candidates(page)
+        if not candidates:
+            break
+        trigger = await analyzer.identify_reveal_trigger(url=url, candidates=candidates)
+        if not trigger.selector:
+            break
+        try:
+            await page.click(trigger.selector, timeout=5_000)
+        except Exception:
+            break
+        clicked.append(trigger.selector)
+        found, waited = await wait_for_signup_form_ready(page)
+        if found:
+            return True, clicked, waited
+    return False, clicked, False
+
+
 # --- Step 3: hard stops ---------------------------------------------------
 #
 # Two independent layers, matching this project's established "don't rely
@@ -573,6 +684,7 @@ def _build_recipe_from_classification(
     email_regex: str | None,
     requires_email_verification: bool,
     requires_async_form_render: bool = False,
+    reveal_click_selector: str | None = None,
 ) -> SignupRecipe:
     kwargs: dict[str, str] = {}
     extra_field_selectors: dict[str, str] = {}
@@ -600,6 +712,7 @@ def _build_recipe_from_classification(
         developer_portal_url_fallback=signup_url,
         extra_field_selectors=extra_field_selectors,
         requires_async_form_render=requires_async_form_render,
+        reveal_click_selector=reveal_click_selector,
         generated_by="discover_signup",
         generated_at=datetime.now(timezone.utc),
         **kwargs,
@@ -721,13 +834,26 @@ async def discover_signup(
             # hadn't rendered yet, indistinguishable from a page that
             # genuinely has no real form at all.
             form_ready, required_waiting = await wait_for_signup_form_ready(page)
+
+            # D-070: the plain wait wasn't the whole story -- some widgets
+            # (NASA's) don't render on any timer at all, only on a click.
+            # Only tried once the passive wait has already failed, never
+            # pre-emptively, since most vendors' forms need no interaction.
+            reveal_clicks: list[str] = []
+            if not form_ready:
+                form_ready, reveal_clicks, waited_after_click = await _reveal_signup_form(
+                    page, analyzer=analyzer, url=signup_url
+                )
+                required_waiting = required_waiting or waited_after_click
+
             if not form_ready:
                 elements_found = await _reduce_dom(page)
+                reveal_note = f", even after clicking {reveal_clicks}" if reveal_clicks else ""
                 return DiscoverSignupResult(
                     identity_key=identity_key, dry_run=not live, signup_url=signup_url,
                     stopped_reason=(
                         f"SIGNUP_FORM_NOT_RENDERED: no visible text/email/password field appeared "
-                        f"within {FORM_READY_TIMEOUT_MS / 1000:.0f}s of loading {signup_url!r} -- "
+                        f"within {FORM_READY_TIMEOUT_MS / 1000:.0f}s of loading {signup_url!r}{reveal_note} -- "
                         f"{len(elements_found)} other element(s) found "
                         f"({', '.join(el.tag for el in elements_found[:10])}"
                         f"{', ...' if len(elements_found) > 10 else ''}), none of them a real form field. "
@@ -737,6 +863,7 @@ async def discover_signup(
                     ),
                 )
 
+            reveal_click_selector = reveal_clicks[-1] if reveal_clicks else None
             elements = await _reduce_dom(page)
 
             _check_structural_payment_fields(elements)
@@ -758,6 +885,7 @@ async def discover_signup(
                     intended_fills=_describe_intended_fills(classification, email_alias=email_alias),
                     required_checkboxes=list(classification.required_checkboxes),
                     submit_selector=classification.submit_selector,
+                    reveal_click_selector=reveal_click_selector,
                 )
 
             account_password = _generate_account_password()
@@ -846,6 +974,7 @@ async def discover_signup(
                 credential_type=credential_type, page_regex=page_regex, email_regex=email_regex,
                 requires_email_verification=requires_email_verification,
                 requires_async_form_render=required_waiting,
+                reveal_click_selector=reveal_click_selector,
             )
             recipe_path = save_generated_recipe(settings.data_dir, identity_key, recipe)
 
