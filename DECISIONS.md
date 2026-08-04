@@ -4355,6 +4355,36 @@ re-verification against Alpha Vantage, held for this fix per the user's
 explicit instruction ("Hold — I skipped the fixes and one blocks the
 Alpha Vantage test"), is reported separately once run.
 
+**A second, distinct known limitation, found live re-verifying against
+Alpha Vantage -- not fixed here, documented as a real residual gap:** the
+live re-run's first attempt reached `_locate_signup_page` with ZERO
+candidates across all three tiers, on a vendor whose real signup page is
+known-working and fully reachable. Diagnosed precisely, not assumed:
+DISCOVER's own `developer_portal_url` extraction (an LLM call, upstream of
+this function entirely -- not RESOLVE, which correctly resolved
+`alphavantage.co` and cleared GATE `AUTO` on every real run made) returned
+`https://www.alphavantage.co/documentation` that run -- a docs page, not
+the real signup form at `/support/#api-key`. A direct fetch of the real
+URL confirmed it was fine on its own (status 200, 4356 chars, a real
+static page). But link-discovery found nothing usable either: Alpha
+Vantage's real "get an API key" call-to-action isn't a plain, crawlable
+`<a href>` matching `_SIGNUP_LINK_RE` anywhere in the 2543-char homepage
+HTML `_locate_signup_page` had to work with, and `/support` isn't one of
+the seven hardcoded guess-list paths. Forcing `developer_portal_url` to
+the correct URL directly confirmed `_locate_signup_page`/`_verify_candidates_in_browser`
+accept it correctly once handed it -- this is not a regression of D-071's
+own fix, which is working exactly as designed: it correctly refuses to
+blindly trust a wrong page rather than silently accepting it (the old,
+pre-D-071 bug). The gap is one layer further up: when extraction gets
+`developer_portal_url` wrong AND neither link-discovery nor the guess-list
+has an alternative, there is currently no path to the correct page at
+all, for any vendor whose signup CTA isn't a crawlable link and isn't
+guess-list-shaped. Explicitly NOT patched with an Alpha-Vantage-specific
+guess-list entry (`/support`) -- that would be exactly the one-vendor
+hardcoding this project's whole DISCOVER_SIGNUP effort exists to avoid,
+fixing today's known case while teaching nothing about the next vendor
+with the same shape of problem.
+
 ### D-072: `auth_required` prompt fix -- D-068 overcorrected on Open-Meteo, requiring evidence of ACQUISITION, not just a key parameter's existence
 
 **Found live, by the user re-checking D-068's own stated exception, not
