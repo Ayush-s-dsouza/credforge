@@ -48,6 +48,7 @@ here; real under the CLI's <code>--live</code>) provision + validate a credentia
   <span class="badge" id="badge-provider">search: --</span>
   <span class="badge" id="badge-runs">runs: --</span>
   <span class="badge" id="badge-live-runs">live runs: --</span>
+  <span class="badge" id="badge-generation-runs">generations: --</span>
 </div>
 
 <section id="sec-examples">
@@ -88,8 +89,17 @@ here; real under the CLI's <code>--live</code>) provision + validate a credentia
 
   <h3 style="margin:20px 0 4px;">Research + gating -- try any app</h3>
   <p style="font-size:.85em;opacity:.7;margin-top:0;">Runs identification, docs discovery, auth
-     classification and the human-needed decision on any vendor. Credential acquisition requires a
-     per-vendor recipe.</p>
+     classification and the human-needed decision on any vendor.</p>
+  <p class="warn" style="font-size:.85em;">
+    <strong>For a vendor with no recipe yet (hand-written or generated):</strong> if GATE clears
+    AUTO and the vendor's signup looks like a simple form-to-key/token flow, this triggers
+    DISCOVER_SIGNUP -- a real, live signup attempt against the real vendor site, with a freshly
+    generated email alias. This is not a simulation and not sandboxed; it may create a real account
+    on the real vendor's service. It stops safely (no submission) at a CAPTCHA, a payment field,
+    SSO-only signup, phone verification, or low classification confidence -- see the log for exactly
+    where, if it stops. A separate, capped counter (badge above) limits how many of these this
+    deployment will attempt.
+  </p>
   <div class="examples-row">
     <button onclick="setApp('Notion')">Notion</button>
     <button onclick="setApp('Stripe')">Stripe</button>
@@ -121,6 +131,12 @@ async function loadStatus() {
   document.getElementById('badge-live-runs').textContent = s.live_enabled
     ? `live runs: ${s.live_runs_remaining} / ${s.live_run_cap} remaining`
     : 'live provisioning: disabled on this deployment';
+  // D-077: Stage 3's own, lower cap -- shown decrementing, same as the
+  // existing live-run badge, so the limit on real signups against
+  // unseen vendors is visible before anyone hits it.
+  document.getElementById('badge-generation-runs').textContent = s.live_enabled
+    ? `live generations: ${s.generation_remaining} / ${s.generation_cap} remaining`
+    : 'live generation: disabled on this deployment';
 
   const row = document.getElementById('live-buttons-row');
   if (s.live_enabled && s.live_recipe_vendors && s.live_recipe_vendors.length) {
@@ -316,6 +332,24 @@ async function runApp() {
             }
             box.innerHTML += '<p style="opacity:.7;font-size:.85em;">UI-level workaround: the pipeline halts on ambiguity rather than guessing; a proper implementation would resume from the chosen candidate instead of re-running RESOLVE from scratch.</p>';
           }
+        } else if (evt.type === 'generation_done') {
+          // D-077: DiscoverSignupResult has a different shape than
+          // HandoffArtifact (field_map/recipe_path/credential_vault_ref,
+          // not api/credential/tos) -- rendered distinctly, not forced
+          // into the artifact box above.
+          const r = evt.result;
+          if (r.credential_vault_ref) {
+            appendLine(`<strong style="color:#059669">GENERATED AND ACQUIRED.</strong> DISCOVER_SIGNUP wrote a new signup recipe for ${escapeHtml(r.identity_key)} and used it to acquire a real credential (vaulted at <code>${escapeHtml(r.credential_vault_ref)}</code> -- never the raw value). Recipe saved to <code>${escapeHtml(r.recipe_path || '')}</code>. Re-run with the exact same input to replay this recipe with no LLM involved.`);
+          } else if (r.stopped_reason) {
+            appendLine(`<span class="warn">generation stopped: ${escapeHtml(r.stopped_reason)}</span>`);
+          } else {
+            appendLine('generation finished with no credential and no stopped_reason -- see the full result below.');
+          }
+          if (r.field_map && r.field_map.length) {
+            appendLine(`classified ${r.field_map.length} field(s): ` + r.field_map.map(f => `${escapeHtml(f.selector)}=${escapeHtml(f.purpose)}`).join(', '));
+          }
+          document.getElementById('run-artifact').textContent = JSON.stringify(r, null, 2);
+          document.getElementById('run-artifact').style.display = 'block';
         }
       }
     }

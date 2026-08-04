@@ -364,6 +364,20 @@ class PlaywrightBrowserDriver:
         # Railway) that produced no exception and no server-side detail.
         self._screenshot_dir = screenshot_dir
 
+    def register_recipe(self, domain: str, recipe: SignupRecipe) -> None:
+        """D-077 (Stage 3, live generation from the web): lets a caller add
+        a freshly-generated recipe to an ALREADY-CONSTRUCTED driver, at
+        runtime -- needed because `providers_live` (webapp/main.py) is
+        built once, at process startup, from whatever
+        `load_generated_recipes(settings.data_dir)` found at that moment.
+        A recipe DISCOVER_SIGNUP generates from a live web request writes
+        to that same directory, but the running process's own in-memory
+        recipe dict would never notice without this: the very next request
+        for the same vendor needs to replay through the normal
+        PROVISION path -- no LLM involved -- and that path only ever
+        consults `self._recipes`, never the filesystem directly."""
+        self._recipes[domain] = recipe
+
     async def signup_and_create_app(
         self,
         *,

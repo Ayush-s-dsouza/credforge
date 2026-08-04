@@ -27,9 +27,11 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from credforge import __version__ as credforge_version  # noqa: E402
 from credforge.config import Settings  # noqa: E402
+from credforge.pipeline.discover_signup import discover_signup, load_generated_recipes  # noqa: E402
 from credforge.pipeline.explain import ExplainEvent  # noqa: E402
 from credforge.pipeline.orchestrator import run_app  # noqa: E402
 from credforge.providers.factory import build_providers  # noqa: E402
+from credforge.providers.playwright_browser import SignupRecipe  # noqa: E402
 from credforge.providers.search import SearchProviderError  # noqa: E402
 from credforge.redaction import scrub_secrets  # noqa: E402
 from credforge.registry.store import AppendOnlyRegistry  # noqa: E402
@@ -44,6 +46,12 @@ RUN_CAP = int(os.environ.get("RUN_CAP", "100"))
 RATE_LIMIT_PER_MIN = int(os.environ.get("RATE_LIMIT_PER_MIN", "3"))
 EXAMPLES_DIR = REPO_ROOT / "examples"
 LIVE_RUN_CAP = int(os.environ.get("LIVE_RUN_CAP", "20"))
+# D-077: Stage 3 (live DISCOVER_SIGNUP generation from an arbitrary,
+# unseen, free-text vendor) is a materially bigger-stakes action than
+# replaying an already-known-good recipe -- its own cap, deliberately
+# lower than LIVE_RUN_CAP, so a public deployment can't be used to
+# trigger unbounded real signups against unknown vendors.
+GENERATION_CAP = int(os.environ.get("GENERATION_CAP", "10"))
 
 # Which ProviderBundle to hand to run_app must be decided *before*
 # run_app's own RESOLVE stage runs and resolves the real domain -- so this
@@ -114,9 +122,11 @@ providers_live = build_providers(settings, live=True) if _live_enabled else None
 
 COUNTER_PATH = settings.data_dir / "run_counter.json"
 LIVE_COUNTER_PATH = settings.data_dir / "live_run_counter.json"
+GENERATION_COUNTER_PATH = settings.data_dir / "generation_counter.json"
 COUNTER_PATH.parent.mkdir(parents=True, exist_ok=True)
 _counter_lock = asyncio.Lock()
 _live_counter_lock = asyncio.Lock()
+_generation_counter_lock = asyncio.Lock()
 
 
 def _read_json_counter(path: Path) -> int:
@@ -158,6 +168,27 @@ def _validate_app_name(raw: str) -> str:
     if not name or not _APP_NAME_RE.match(name) or "://" in name.lower() or name.lower().startswith("http"):
         raise HTTPException(400, "invalid app name -- letters/numbers/spaces/hyphens only, no URLs")
     return name
+
+
+def _match_generated_recipe(app_name: str) -> tuple[str, str] | None:
+    """(domain, docs_url) for a PREVIOUSLY generated recipe whose
+    identity_key exactly matches app_name (case-insensitive) -- unlike
+    `_match_recipe_identity`'s display-name/slug matching for the fixed
+    set of hand-written vendors, Stage 3 has no curated display name to
+    match against; the caller is expected to type the same real domain
+    both times, which is exactly what re-running a vendor DISCOVER_SIGNUP
+    already generated a recipe for looks like (e.g. clicking the same
+    "candidates found" card, or re-typing what the mode banner showed).
+    Re-read from disk on every call, not cached: a recipe a PRIOR request
+    generated in this same process has to be visible to the very next
+    one, which a frozen provider snapshot wouldn't be -- see
+    DECISIONS.md D-077."""
+    domain = app_name.strip().lower()
+    generated = load_generated_recipes(settings.data_dir)
+    recipe = generated.get(domain)
+    if recipe is None:
+        return None
+    return domain, recipe.docs_url
 
 
 def _assert_no_raw_credential(artifact) -> None:
@@ -227,6 +258,12 @@ def status() -> dict:
         "live_runs_used": _read_json_counter(LIVE_COUNTER_PATH),
         "live_run_cap": LIVE_RUN_CAP,
         "live_runs_remaining": max(0, LIVE_RUN_CAP - _read_json_counter(LIVE_COUNTER_PATH)),
+        # D-077: separate, lower cap -- live DISCOVER_SIGNUP generation
+        # against an arbitrary, unseen vendor is a materially bigger-stakes
+        # action than replaying an already-known-good recipe.
+        "generation_used": _read_json_counter(GENERATION_COUNTER_PATH),
+        "generation_cap": GENERATION_CAP,
+        "generation_remaining": max(0, GENERATION_CAP - _read_json_counter(GENERATION_COUNTER_PATH)),
         "live_enabled": _live_enabled,
         "live_recipe_vendors": [
             {
@@ -311,9 +348,25 @@ async def api_run(request: Request, k: str | None = Query(None)) -> StreamingRes
     if not _check_rate_limit(ip):
         raise HTTPException(429, "rate limit exceeded -- a few runs per minute per IP, try again shortly")
 
-    recipe_match = _match_recipe_identity(app_name)  # (domain, docs_url) or None
-    recipe_label = _RECIPE_DISPLAY_NAMES.get(recipe_match[0], recipe_match[0]) if recipe_match else None
-    use_live = bool(recipe_match and _live_enabled)
+    recipe_match = _match_recipe_identity(app_name)  # (domain, docs_url) or None -- hand-written
+    # D-077: only look for a generated match when no hand-written one
+    # already won -- a hand-written recipe always takes precedence for
+    # identity/label purposes here (matching merge_recipes' OWN
+    # precedence would actually favor generated, but _match_recipe_identity
+    # is used for identity-pinning/display, not selecting which recipe
+    # PROVISION uses -- that part is already correctly generated-first via
+    # D-075's factory.py wiring, independent of this check).
+    generated_match = None if recipe_match else _match_generated_recipe(app_name)
+    effective_match = recipe_match or generated_match
+    recipe_label = _RECIPE_DISPLAY_NAMES.get(effective_match[0], effective_match[0]) if effective_match else None
+    use_live = bool(effective_match and _live_enabled)
+    # D-077 (Stage 3): no existing recipe of ANY kind matched at all --
+    # eligible to try live generation instead of stopping at "no recipe,
+    # nothing attempted". Whether generation actually reaches a real
+    # signup is still entirely gated by discover_signup()'s own internal
+    # checks (GATE=AUTO, right archetype, idempotency, hard stops) --
+    # this only decides which code path handles the request.
+    attempt_generation = effective_match is None and _live_enabled
 
     async with _counter_lock:
         used = _read_json_counter(COUNTER_PATH)
@@ -332,6 +385,24 @@ async def api_run(request: Request, k: str | None = Query(None)) -> StreamingRes
                 )
             _write_json_counter(LIVE_COUNTER_PATH, live_used + 1)
 
+    if attempt_generation:
+        # D-077: reserved BEFORE calling discover_signup, unconditionally --
+        # this is the true upper bound on how many times discover_signup(live=True)
+        # is ever invoked from the web, even though many of those calls
+        # will stop before ever touching a real browser (wrong archetype,
+        # GATE not AUTO, hard stop). Safer to undercount "real signups
+        # attempted" than to let this cap be bypassed by a vendor that
+        # happens to stop early.
+        async with _generation_counter_lock:
+            gen_used = _read_json_counter(GENERATION_COUNTER_PATH)
+            if gen_used >= GENERATION_CAP:
+                raise HTTPException(
+                    429,
+                    f"live-generation cap ({GENERATION_CAP}) reached for this deployment -- "
+                    "see the Alpha Vantage example (a recipe DISCOVER_SIGNUP already generated) instead",
+                )
+            _write_json_counter(GENERATION_COUNTER_PATH, gen_used + 1)
+
     active_providers = providers_live if use_live else providers_mock
 
     async def event_stream():
@@ -348,18 +419,28 @@ async def api_run(request: Request, k: str | None = Query(None)) -> StreamingRes
             {
                 "type": "mode",
                 "live": use_live,
+                "generation": attempt_generation,
                 "message": (
                     "LIVE CREDENTIAL ACQUISITION -- real signup, real credential, "
                     "validated with a real API call."
                     if use_live
                     else (
-                        "RESEARCH + GATING -- real search, fetch and extraction. "
-                        "No signup recipe for this vendor, so credential acquisition is not attempted."
-                        if not recipe_match
+                        "LIVE GENERATION -- no existing recipe for this vendor, hand-written or "
+                        "generated. If GATE clears AUTO and the signup-form-to-key archetype fits, "
+                        "DISCOVER_SIGNUP attempts a REAL signup on the real vendor site, live, with "
+                        "a freshly generated email alias -- this is not a simulation, and it may "
+                        "stop at any point (CAPTCHA, low confidence, wrong archetype) exactly like "
+                        "the CLI would."
+                        if attempt_generation
                         else (
                             "RESEARCH + GATING -- real search, fetch and extraction. "
-                            f"A signup recipe exists for {recipe_label}, but live provisioning is "
-                            "disabled on this deployment, so credential acquisition is not attempted."
+                            "No signup recipe for this vendor, so credential acquisition is not attempted."
+                            if not effective_match
+                            else (
+                                "RESEARCH + GATING -- real search, fetch and extraction. "
+                                f"A signup recipe exists for {recipe_label}, but live provisioning is "
+                                "disabled on this deployment, so credential acquisition is not attempted."
+                            )
                         )
                     )
                 ),
@@ -368,6 +449,41 @@ async def api_run(request: Request, k: str | None = Query(None)) -> StreamingRes
 
         async def runner() -> None:
             try:
+                if attempt_generation:
+                    result = await discover_signup(
+                        app_name, providers=providers_live, settings=settings, registry=registry,
+                        vault=vault, run_id=run_id, live=True, explain=sink,
+                    )
+                    if result.recipe_path and result.credential_vault_ref:
+                        # D-077: make the freshly-generated recipe available
+                        # to THIS process's own PlaywrightBrowserDriver
+                        # immediately -- providers_live was built once at
+                        # startup, so a second request for the same vendor
+                        # would never find it otherwise. Best-effort: the
+                        # recipe is safely on disk either way (D-075's
+                        # factory.py wiring will pick it up on the NEXT
+                        # redeploy regardless), so a failure here just
+                        # means this one process's very next request would
+                        # re-read from disk on its own via
+                        # _match_generated_recipe instead of finding it
+                        # already registered -- not a correctness problem,
+                        # only a missed fast path.
+                        try:
+                            generated_recipe = SignupRecipe.model_validate_json(
+                                Path(result.recipe_path).read_text(encoding="utf-8")
+                            )
+                            providers_live.browser.register_recipe(result.identity_key, generated_recipe)
+                        except Exception as exc:
+                            await queue.put(
+                                {
+                                    "type": "stage", "stage": "provision", "identity_key": result.identity_key,
+                                    "message": f"generated recipe written but could not be hot-registered: {exc}",
+                                    "elapsed_ms": int((time.monotonic() - start) * 1000),
+                                }
+                            )
+                    safe_result = json.loads(scrub_secrets(result.model_dump_json()))
+                    await queue.put({"type": "generation_done", "result": safe_result})
+                    return
                 state, artifact = await run_app(
                     app_name,
                     providers=active_providers,

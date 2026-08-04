@@ -39,6 +39,22 @@ _FORM_WITH_PUNCTUATED_CREDENTIAL_HTML = (
 )
 
 
+def test_register_recipe_adds_to_an_already_constructed_driver() -> None:
+    # D-077: providers_live (webapp/main.py) is built once at process
+    # startup -- a recipe DISCOVER_SIGNUP generates from a live web
+    # request has to reach the SAME driver instance's lookup at runtime,
+    # not just get written to disk, or a second request for the same
+    # vendor could never replay it.
+    driver = PlaywrightBrowserDriver()
+    assert driver._recipes.get("example.com") is None
+    recipe = SignupRecipe(
+        email_field_selector="#email", submit_selector="#submit",
+        credential_type=CredentialType.API_KEY, docs_url="https://developer.example.com/docs",
+    )
+    driver.register_recipe("example.com", recipe)
+    assert driver._recipes.get("example.com") is recipe
+
+
 @pytest.mark.asyncio
 async def test_no_recipe_registered_fails_clearly_without_attempting_generic_automation() -> None:
     # The core design decision under test: no per-vendor SignupRecipe means
