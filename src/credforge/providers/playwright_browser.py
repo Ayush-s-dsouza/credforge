@@ -93,6 +93,69 @@ async def dismiss_cookie_banner(page) -> None:
             continue
 
 
+# D-069 (DISCOVER_SIGNUP): the same class of problem as D-066's JS-shell
+# fetch fallback, one stage further down the pipeline -- content arriving
+# asynchronously. Found live against NASA: api.nasa.gov's real signup
+# widget is injected by a third-party embed script
+# (api.data.gov's signup_embed.js, per NASA_API's own recipe comment
+# below) that hasn't populated the DOM yet at the moment a fixed-delay
+# snapshot is taken -- DOM reduction then only sees page chrome (nav
+# buttons, search boxes, API-category filters), and a classifier correctly,
+# appropriately reports near-zero confidence on a form that isn't there
+# yet, rather than the page never having a real form at all. The
+# readiness check is deliberately GENERIC -- a real, visible, non-search
+# text/email/password input having appeared anywhere in the DOM -- never
+# a vendor-specific selector, which would be exactly the hardcoding this
+# generator exists to avoid. Mirrors the SAME polling pattern the
+# api_key_page_selector credential-extraction loop already uses further
+# down this same file, applied one step earlier in the flow.
+FORM_READY_TIMEOUT_MS = 15_000
+FORM_READY_POLL_INTERVAL_MS = 500
+
+_FORM_READY_CHECK_JS = """
+() => {
+  const candidates = document.querySelectorAll('input');
+  for (const el of candidates) {
+    const type = (el.getAttribute('type') || 'text').toLowerCase();
+    if (!['text', 'email', 'password'].includes(type)) continue;
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    if (role === 'search') continue;
+    const name = el.getAttribute('name') || '';
+    const id = el.getAttribute('id') || '';
+    const placeholder = el.getAttribute('placeholder') || '';
+    const haystack = (name + ' ' + id + ' ' + placeholder).toLowerCase();
+    if (/search|query|filter/.test(haystack)) continue;
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    if (rect.width === 0 || rect.height === 0 || style.visibility === 'hidden' || style.display === 'none') continue;
+    return true;
+  }
+  return false;
+}
+"""
+
+
+async def wait_for_signup_form_ready(
+    page, *, timeout_ms: int = FORM_READY_TIMEOUT_MS, poll_interval_ms: int = FORM_READY_POLL_INTERVAL_MS
+) -> tuple[bool, bool]:
+    """Polls until at least one visible, non-search text/email/password
+    input appears anywhere in the DOM. Returns (found, required_waiting):
+    `found` is False only on a genuine timeout -- a real, honest signal to
+    the caller, never silently treated as "the form must just be empty
+    with no fields." `required_waiting` is True whenever the field wasn't
+    already present on the very first check -- callers use this to decide
+    whether a generated recipe needs to repeat this same wait on replay."""
+    if await page.evaluate(_FORM_READY_CHECK_JS):
+        return True, False
+    elapsed_ms = 0
+    while elapsed_ms < timeout_ms:
+        await page.wait_for_timeout(poll_interval_ms)
+        elapsed_ms += poll_interval_ms
+        if await page.evaluate(_FORM_READY_CHECK_JS):
+            return True, True
+    return False, True
+
+
 class SignupRecipe(BaseModel):
     email_field_selector: str
     submit_selector: str
@@ -196,6 +259,14 @@ class SignupRecipe(BaseModel):
     company_field_selector: str | None = None
     extra_field_selectors: dict[str, str] = Field(default_factory=dict)
 
+    # D-069: True when this vendor's signup form is injected asynchronously
+    # (a third-party embed script, a client-rendered widget) and wasn't yet
+    # present in the DOM on first load -- found live, NASA's real signup
+    # form only appears after api.data.gov's signup_embed.js finishes
+    # running. When set, replay waits for wait_for_signup_form_ready()
+    # before attempting to fill any field, same as generation did.
+    requires_async_form_render: bool = False
+
     # Provenance: unset for every hand-authored recipe in this file (all
     # four were read and written by a human directly). Set only by
     # DISCOVER_SIGNUP, so a recipe's origin is always visible just by
@@ -244,6 +315,31 @@ class PlaywrightBrowserDriver:
                 await page.goto(developer_portal_url)
                 await dismiss_cookie_banner(page)
                 steps.append(ProvisionStepResult(step="navigate_to_signup", success=True))
+
+                if recipe.requires_async_form_render:
+                    # D-069: this recipe's own generation run needed to
+                    # wait for the same asynchronously-injected form --
+                    # replay must too, or it fills a page that hasn't
+                    # rendered its real fields yet.
+                    form_ready, _ = await wait_for_signup_form_ready(page)
+                    if not form_ready:
+                        steps.append(
+                            ProvisionStepResult(
+                                step="wait_for_signup_form_ready",
+                                success=False,
+                                detail=f"no visible form field appeared within {FORM_READY_TIMEOUT_MS / 1000:.0f}s",
+                            )
+                        )
+                        return ProvisionOutcome(
+                            success=False,
+                            credential_type=CredentialType.NONE,
+                            steps=steps,
+                            failure_reason=(
+                                "SIGNUP_FORM_NOT_RENDERED: recipe expects an asynchronously-rendered "
+                                "form, but no visible field appeared within the wait window"
+                            ),
+                        )
+                    steps.append(ProvisionStepResult(step="wait_for_signup_form_ready", success=True))
 
                 await page.fill(recipe.email_field_selector, email_alias)
                 if recipe.first_name_field_selector:

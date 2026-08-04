@@ -193,6 +193,33 @@ def test_build_recipe_maps_known_purposes_to_named_recipe_fields() -> None:
     assert recipe.developer_portal_url_fallback == "https://example.com/signup"
 
 
+def test_build_recipe_defaults_requires_async_form_render_to_false() -> None:
+    elements = [_element(selector="[name='email']", name="email", required=True)]
+    classification = _classification(field_map=[ClassifiedField(selector="[name='email']", purpose="email")])
+    recipe = _build_recipe_from_classification(
+        classification, elements,
+        domain="example.com", docs_url="https://example.com/docs", signup_url="https://example.com/signup",
+        credential_type=CredentialType.API_KEY, page_regex=r"key:\s*(\S+)", email_regex=None,
+        requires_email_verification=False,
+    )
+    assert recipe.requires_async_form_render is False
+
+
+def test_build_recipe_records_requires_async_form_render_when_the_form_needed_a_wait() -> None:
+    # NASA's signup widget (api_umbrella's signup_embed.js) renders after
+    # the initial page load -- the generator has to wait for it (D-069), and
+    # that fact is recorded in the recipe so replay knows to wait too.
+    elements = [_element(selector="[name='email']", name="email", required=True)]
+    classification = _classification(field_map=[ClassifiedField(selector="[name='email']", purpose="email")])
+    recipe = _build_recipe_from_classification(
+        classification, elements,
+        domain="example.com", docs_url="https://example.com/docs", signup_url="https://example.com/signup",
+        credential_type=CredentialType.API_KEY, page_regex=r"key:\s*(\S+)", email_regex=None,
+        requires_email_verification=False, requires_async_form_render=True,
+    )
+    assert recipe.requires_async_form_render is True
+
+
 def test_build_recipe_keeps_password_and_password_confirm_as_separate_selectors() -> None:
     # Real bug caught via live dry-run against api-ninjas.com: two distinct
     # password fields (password + confirm) both classified under a single

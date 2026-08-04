@@ -65,12 +65,14 @@ from ..providers.factory import ProviderBundle
 from ..providers.fetch import FetchException, FetchProvider
 from ..providers.playwright_browser import (
     EXTRA_FIELD_DEFAULTS,
+    FORM_READY_TIMEOUT_MS,
     SIGNUP_COMPANY,
     SIGNUP_FIRST_NAME,
     SIGNUP_FULL_NAME,
     SIGNUP_LAST_NAME,
     SignupRecipe,
     dismiss_cookie_banner,
+    wait_for_signup_form_ready,
 )
 from ..providers.signup_generation import ClassifiedField, FormElement, SignupFormClassification
 from ..redaction import register_secret
@@ -570,6 +572,7 @@ def _build_recipe_from_classification(
     page_regex: str | None,
     email_regex: str | None,
     requires_email_verification: bool,
+    requires_async_form_render: bool = False,
 ) -> SignupRecipe:
     kwargs: dict[str, str] = {}
     extra_field_selectors: dict[str, str] = {}
@@ -596,6 +599,7 @@ def _build_recipe_from_classification(
         api_key_email_regex=email_regex,
         developer_portal_url_fallback=signup_url,
         extra_field_selectors=extra_field_selectors,
+        requires_async_form_render=requires_async_form_render,
         generated_by="discover_signup",
         generated_at=datetime.now(timezone.utc),
         **kwargs,
@@ -706,6 +710,33 @@ async def discover_signup(
             page = await browser.new_page()
             await page.goto(signup_url)
             await dismiss_cookie_banner(page)
+
+            # D-069: wait for a real, visible, non-search form field to
+            # appear before ever reducing the DOM -- found live against
+            # NASA, whose signup form is injected asynchronously by a
+            # third-party embed script. Without this, a fixed-delay
+            # snapshot only sees page chrome (nav, search, category
+            # filters), and the classifier -- correctly, given what it was
+            # shown -- reports near-zero confidence on a form that simply
+            # hadn't rendered yet, indistinguishable from a page that
+            # genuinely has no real form at all.
+            form_ready, required_waiting = await wait_for_signup_form_ready(page)
+            if not form_ready:
+                elements_found = await _reduce_dom(page)
+                return DiscoverSignupResult(
+                    identity_key=identity_key, dry_run=not live, signup_url=signup_url,
+                    stopped_reason=(
+                        f"SIGNUP_FORM_NOT_RENDERED: no visible text/email/password field appeared "
+                        f"within {FORM_READY_TIMEOUT_MS / 1000:.0f}s of loading {signup_url!r} -- "
+                        f"{len(elements_found)} other element(s) found "
+                        f"({', '.join(el.tag for el in elements_found[:10])}"
+                        f"{', ...' if len(elements_found) > 10 else ''}), none of them a real form field. "
+                        "This is a distinct outcome from a low-confidence classification: the page may "
+                        "render its form asynchronously and need longer, or this genuinely isn't a "
+                        "signup page."
+                    ),
+                )
+
             elements = await _reduce_dom(page)
 
             _check_structural_payment_fields(elements)
@@ -814,6 +845,7 @@ async def discover_signup(
                 domain=identity_key, docs_url=docs_url or signup_url, signup_url=signup_url,
                 credential_type=credential_type, page_regex=page_regex, email_regex=email_regex,
                 requires_email_verification=requires_email_verification,
+                requires_async_form_render=required_waiting,
             )
             recipe_path = save_generated_recipe(settings.data_dir, identity_key, recipe)
 

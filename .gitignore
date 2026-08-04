@@ -23,6 +23,8 @@ scripts/scratch_discover_signup.py
 scripts/scratch_nasa_generation.py
 scripts/scratch_nasa_diag.py
 scripts/scratch_nasa_generation_bare.py
+scripts/scratch_nasa_diag.py
+scripts/scratch_nasa_form_diag.py
 scratch_batch_output/
 
 # personal interview prep, not a submitted deliverable -- kept on a

@@ -4089,3 +4089,95 @@ it, `HeuristicExtractor` always reports `"required"`). Both schema paths
 (`ClassifyExtraction`, `ClassifyResult`, `ApiInfo`) accept the new field
 with a safe default, so no existing fixture or test construction needed
 updating.
+
+### D-069: `wait_for_signup_form_ready` -- DISCOVER_SIGNUP's DOM snapshot can fire before an async-rendered signup form exists, the same class of bug as D-066 one stage further down the pipeline
+
+**Found live, not designed speculatively:** with D-068 fixed and RESOLVE
+pinned to `https://api.nasa.gov/` via a test-harness-only patch (isolating
+the experiment from RESOLVE's real candidate-ranking variance -- see the
+harness pattern below), two consecutive pinned generation attempts both
+reached GATE `AUTO` -- confirming the D-068 fix worked -- but both then
+hard-stopped on low form-classification confidence before a recipe could
+be built. Diagnosed directly rather than retried blind: a standalone
+script (`scripts/scratch_nasa_form_diag.py`) called `_locate_signup_page`,
+`dismiss_cookie_banner`, and `_reduce_dom` in isolation against
+`https://api.nasa.gov/` and inspected the raw output. DOM reduction found
+24 elements -- two search inputs (`#basic-search-field-small`,
+`#search-field-big`) and 22 nav/category buttons (`apod`, `asteroids-neows`,
+`donki`, `eonet`, ... `techport`, `tle-api`) -- zero real form fields.
+The LLM classification against that snapshot was `field_map=[]`,
+`submit_selector=null`, `confidence=0.1`: a correct, honest read of a
+page-chrome-only DOM, not a misclassification. NASA's signup widget is
+rendered by a separate script (api_umbrella's `signup_embed.js`) that
+loads *after* the initial page, and the DOM snapshot was being taken
+before it finished. Structurally identical to D-066 (a plain fetch racing
+a JS app shell) -- content arriving asynchronously -- just one stage
+later in the flow: the browser page, not the HTTP fetch.
+
+**The fix -- a general readiness poll, not a vendor-specific wait:**
+`wait_for_signup_form_ready(page, *, timeout_ms=15_000,
+poll_interval_ms=500) -> tuple[bool, bool]` (`playwright_browser.py`).
+Condition, checked entirely in-DOM: at least one `<input>` of type
+text/email/password that is visible (non-zero rendered size, not
+`display:none`/`visibility:hidden`) and is not a search field (excludes
+`type="search"`, `role="search"`, and any input whose name/id/placeholder
+matches `/search|query|filter/i`). Checked immediately, then polled every
+~500ms up to a 15s cap. This deliberately mirrors the polling pattern
+`discover_signup.py` already uses for NASA's async-rendered credential
+page (`api_key_page_selector`) -- same technique, applied one stage
+earlier, generalized to "a real field exists" instead of "this specific
+selector exists." Waiting for `#user_email` specifically -- the obvious
+shortcut, since that selector is known from the hand-written NASA
+recipe -- was explicitly rejected as exactly the hardcoding this project
+exists to eliminate; the condition never references NASA, a selector, or
+any vendor-specific string.
+
+**Wired into both paths that build or replay a DOM-dependent form fill,**
+each keeping its own failure semantics:
+
+- **Generation** (`discover_signup()`): the wait runs unconditionally,
+  right after `dismiss_cookie_banner` and before `_reduce_dom` -- every
+  vendor gets the chance to finish rendering before its form is read, since
+  generation doesn't yet know whether a given vendor needs it. On timeout,
+  `discover_signup()` returns a distinct `stopped_reason` prefixed
+  `SIGNUP_FORM_NOT_RENDERED:`, including the element count and the tags
+  actually found (e.g. "24 other element(s) found (button, button, input,
+  ...), none of them a real form field") -- so a page-chrome-only snapshot
+  can never again be silently absorbed into a generic low-confidence
+  result and mistaken for a classification failure the way it was for two
+  full attempts before this diagnosis. That confusion is the direct
+  reason this fix exists.
+- **Replay** (`signup_and_create_app`): the wait only runs `if
+  recipe.requires_async_form_render` -- a per-vendor fact learned once at
+  generation time, not re-discovered (or blindly paid for) on every
+  replay. On timeout, `ProvisionOutcome.failure_reason` carries the same
+  `SIGNUP_FORM_NOT_RENDERED:` prefix, so a replay failure of this kind is
+  distinguishable from every other provisioning failure in logs/reports.
+
+**`SignupRecipe.requires_async_form_render: bool = False`** (new field)
+is the channel between the two paths: generation sets it from
+`wait_for_signup_form_ready`'s own second return value (`required_waiting`
+-- true if the immediate check failed and the poll loop had to run at
+least once), and persists it into the emitted recipe JSON. Replay reads it
+back and only pays the wait for vendors that actually need it -- a
+synchronously-rendered form's replay pays zero extra latency, since
+`required_waiting=False` skips the wait branch entirely rather than
+polling-and-immediately-succeeding.
+
+**Rejected: a fixed sleep before DOM reduction** (e.g. `await
+page.wait_for_timeout(3000)`), the same shape of rejected alternative as
+D-066's shell-detection design. A constant either wastes time on the
+common case (a form that's already rendered pays the full sleep anyway)
+or still races a genuinely slow one -- indistinguishable from this bug
+recurring on a different vendor. Polling a real, checkable condition costs
+nothing when the form is already present (the immediate pre-poll check
+returns `(True, False)` with no `wait_for_timeout` call at all) and scales
+its cost to however long the specific page actually needs, capped.
+
+**Verified:** 301/301 tests pass (2 new:
+`test_build_recipe_defaults_requires_async_form_render_to_false`,
+`test_build_recipe_records_requires_async_form_render_when_the_form_needed_a_wait`
+-- both exercise `_build_recipe_from_classification`'s new parameter the
+same way its existing purpose-mapping tests are structured). Live
+re-verification against NASA with the fix applied is the next step,
+reported separately once run.
