@@ -22,6 +22,22 @@ _BARE_FORM_HTML = (
     "</form>"
 )
 
+# D-074: a form whose "submit" click injects a credential immediately
+# followed by real sentence punctuation into #result -- the exact shape a
+# prose-anchored generated regex (`_build_anchored_regex`'s generic
+# `[^\s<"']+` capture) matches against, found live on Alpha Vantage's own
+# real post-submit page.
+_FORM_WITH_PUNCTUATED_CREDENTIAL_HTML = (
+    "data:text/html,"
+    "<form>"
+    "<input id='email'>"
+    "<button id='submit' type='button' "
+    "onclick=\"document.getElementById('result').innerText="
+    "'Here is your API key: XJ7QP2KD9M. Keep it safe.'\">Sign up</button>"
+    "</form>"
+    "<div id='result'></div>"
+)
+
 
 @pytest.mark.asyncio
 async def test_no_recipe_registered_fails_clearly_without_attempting_generic_automation() -> None:
@@ -85,6 +101,42 @@ async def test_recipe_with_no_extraction_mechanism_fails_instead_of_reporting_em
     assert "no extraction mechanism" in outcome.failure_reason
     extract_step = next(s for s in outcome.steps if s.step == "extract_credential")
     assert extract_step.success is False
+
+
+@pytest.mark.asyncio
+async def test_page_based_extraction_strips_trailing_sentence_punctuation() -> None:
+    # D-074: found live replaying a DISCOVER_SIGNUP-generated Alpha Vantage
+    # recipe -- the real post-submit page read "...API key: XJ7QP2KD9M.
+    # Keep it safe.", and the vaulted credential came back as
+    # "XJ7QP2KD9M." (trailing period included). discover_signup.py's own
+    # `_extract_anchored_value` already strips this at GENERATION time
+    # (D-061), but nothing stripped it again here at REPLAY time -- the
+    # exact same generic `[^\s<"']+` capture group swallows trailing
+    # punctuation on both sides, so both extraction points need the fix.
+    recipe = SignupRecipe(
+        email_field_selector="#email",
+        submit_selector="#submit",
+        credential_type=CredentialType.API_KEY,
+        docs_url="https://developer.example.com/docs",
+        api_key_page_selector="#result",
+        api_key_page_regex=r"Here is your API key:\s*([^\s<\"']+)",
+    )
+    driver = PlaywrightBrowserDriver(recipes={_FORM_WITH_PUNCTUATED_CREDENTIAL_HTML: recipe})
+
+    outcome = await driver.signup_and_create_app(
+        developer_portal_url=_FORM_WITH_PUNCTUATED_CREDENTIAL_HTML,
+        email_alias="credforge+example@example.com",
+        email_provider=MockEmailProvider(),
+        app_display_name="Example App",
+        redirect_uris=[],
+        account_password="generated-pw-abc123",
+        headed=False,
+    )
+
+    assert outcome.success is True
+    assert outcome.raw_api_credential["api_key"] == "XJ7QP2KD9M"
+    extract_step = next(s for s in outcome.steps if s.step == "extract_credential")
+    assert extract_step.success is True
 
 
 # --- evaluate_with_navigation_retry (D-073) -------------------------------

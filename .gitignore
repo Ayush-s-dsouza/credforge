@@ -34,6 +34,9 @@ scripts/scratch_av_locate_diag.py
 scripts/scratch_av_replay.py
 scripts/scratch_openmeteo_docs_check.py
 scripts/scratch_auth_required_verify.py
+scripts/scratch_nondeterminism_measure.py
+scripts/scratch_av_pinned_generation.py
+scripts/scratch_av_pinned_replay.py
 scratch_batch_output/
 
 # personal interview prep, not a submitted deliverable -- kept on a

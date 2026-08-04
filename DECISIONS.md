@@ -4496,3 +4496,50 @@ itself is pure control flow, exactly what a fake `evaluate`/`wait_for_load_state
 pair can exercise precisely: succeeds immediately with no error, retries
 once and recovers, raises the distinct error when the retry also fails,
 and propagates any UNRELATED error without retrying at all).
+
+### D-074: replay-path credential extraction now strips trailing sentence punctuation, matching generation's own fix
+
+**Found live, by the deliverable itself working correctly enough to
+expose it:** the Alpha Vantage pinned-URL replay test (using ONLY the
+DISCOVER_SIGNUP-generated recipe, no LLM anywhere in the provisioning
+path) succeeded end to end -- a real credential extracted and vaulted --
+but the extracted value was `"YC5NY2J31O367YWQ."`, with a trailing period
+that is plainly not part of the real key. The generated recipe's
+`api_key_page_regex` is prose-anchored (`_build_anchored_regex`, D-061's
+fix), built around a generic `[^\s<"']+` capture group that doesn't know
+the credential's real alphabet -- it happily captures a trailing period
+too, exactly the failure mode D-061 already documented and D-065's
+`_extract_anchored_value` already fixed with `.rstrip(_TRAILING_PUNCTUATION)`
+**at generation time**. What this replay exposed: nothing applied that
+same stripping **at replay time**. `playwright_browser.py`'s own
+credential-extraction code (`signup_and_create_app`, both the
+`api_key_email_regex` path and the `api_key_page_regex` path) used
+`match.group(1)` directly, unstripped -- so a recipe that extracted
+cleanly during generation could still vault a corrupted credential on
+every subsequent replay, silently, since a stray trailing character
+doesn't fail extraction, it just produces a wrong value that would only
+surface as a mysterious auth failure much later.
+
+**The fix:** a `_TRAILING_PUNCTUATION` constant, identical to
+`discover_signup.py`'s (same characters, same reasoning) but deliberately
+duplicated rather than imported -- this project keeps each stage's own
+helpers to itself rather than introducing the first cross-module private
+dependency (the same precedent `_locate_signup_page`'s own docstring
+already states). Both of `playwright_browser.py`'s credential-extraction
+call sites now `.rstrip(_TRAILING_PUNCTUATION)` the matched group before
+it's ever stored in `raw_api_credential`, matching generation's own
+behavior exactly.
+
+**Verified:** 319/319 tests pass (1 new: a `data:` URL fixture whose
+"submit" click injects `"Here is your API key: XJ7QP2KD9M. Keep it
+safe."` into a result element, with a recipe using the same generic
+prose-anchored regex shape DISCOVER_SIGNUP actually generates -- asserts
+the vaulted credential is the clean `"XJ7QP2KD9M"`, not
+`"XJ7QP2KD9M."`. Real Playwright against a local `data:` page, same
+convention this file's existing extraction-mechanism test already uses,
+not a live vendor call). Not re-verified against a sixth live Alpha
+Vantage signup -- deliberately, given the real throttling risk already
+flagged on this exact vendor after five live attempts this session; the
+unit test reproduces the exact real failure text verbatim and is
+sufficient confirmation without spending a scarce, rate-limited live
+attempt on it.
