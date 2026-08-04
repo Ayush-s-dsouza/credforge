@@ -15,6 +15,8 @@ from credforge.pipeline.discover_signup import (
     _check_structural_payment_fields,
     _describe_intended_fills,
     _extract_anchored_value,
+    _filter_signup_links,
+    _gather_links_via_browser,
     _locate_signup_page,
     load_generated_recipes,
     merge_recipes,
@@ -255,6 +257,79 @@ async def test_locate_signup_page_still_gathers_link_discovery_candidates_even_w
     devportal_idx = candidates.index(("https://example.com/docs", "developer_portal_url"))
     link_idx = candidates.index(("https://example.com/signup", "link_discovery"))
     assert devportal_idx < link_idx
+
+
+# --- _filter_signup_links: shared filter used by both the plain-HTML -----
+# parser and _gather_links_via_browser's rendered-DOM harvest (D-079 Part 2)
+
+
+def test_filter_signup_links_rejects_off_domain_and_non_signup_shaped_links() -> None:
+    raw = [
+        ("https://example.com/register", "Register"),
+        ("https://other-domain.com/register", "Register"),  # off-domain
+        ("https://example.com/blog", "Blog"),  # not signup-shaped
+        ("#", "Sign Up"),  # fragment-only href, rejected regardless of text
+        ("mailto:hi@example.com", "Sign Up"),  # rejected scheme
+    ]
+    result = _filter_signup_links(raw, base_url="https://example.com/", vendor_domain="example.com")
+    assert result == ["https://example.com/register"]
+
+
+def test_filter_signup_links_dedupes_relative_and_absolute_forms_of_the_same_url() -> None:
+    raw = [
+        ("https://example.com/signup", "Sign Up"),
+        ("/signup", "Sign Up (nav, relative)"),
+    ]
+    result = _filter_signup_links(raw, base_url="https://example.com/", vendor_domain="example.com")
+    assert result == ["https://example.com/signup"]
+
+
+# --- _gather_links_via_browser: real (offline, data: URL) Playwright -----
+# render -- the D-079 Part 2 fix. Same real-Playwright-in-tests pattern
+# already used by test_playwright_browser.py (data: URL fixtures, no
+# network, no mocked page object).
+
+
+@pytest.mark.asyncio
+async def test_gather_links_via_browser_sees_links_added_after_js_hydration() -> None:
+    # This is the exact bug being fixed: coingecko.com's raw HTML (what a
+    # plain httpx fetch sees) has zero <a> tags at all -- its real nav only
+    # exists after client-side JS runs. This fixture reproduces that shape
+    # directly: no anchors in the initial markup, three appear after a
+    # delayed script runs, simulating SPA hydration.
+    html = (
+        "data:text/html,"
+        "<div id='nav'></div>"
+        "<script>setTimeout(() => { document.getElementById('nav').innerHTML = "
+        "'<a href=\"https://example.com/register\">Register</a>"
+        "<a href=\"https://other-domain.com/register\">Off-domain</a>"
+        "<a href=\"https://example.com/blog\">Blog</a>'; "
+        "}, 200);</script>"
+    )
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        links = await _gather_links_via_browser(page, url=html, vendor_domain="example.com")
+        await browser.close()
+
+    assert links == ["https://example.com/register"]
+
+
+@pytest.mark.asyncio
+async def test_gather_links_via_browser_returns_empty_list_on_unreachable_url() -> None:
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        links = await _gather_links_via_browser(
+            page, url="https://this-domain-does-not-exist-credforge-test.invalid", vendor_domain="example.com",
+        )
+        await browser.close()
+
+    assert links == []
 
 
 @pytest.mark.asyncio

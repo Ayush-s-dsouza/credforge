@@ -90,6 +90,7 @@ from ..utils.domains import registrable_domain
 from ..vault.crypto_vault import FernetVault
 from ..vault.secret_ref import make_vault_ref
 from .explain import NULL_EXPLAIN, ExplainEvent, ExplainSink
+from .llm_call_log import LlmCallLog, llm_call_log_path
 from .orchestrator import run_app, settings_fingerprint
 from .validate import validate
 
@@ -124,10 +125,13 @@ class DiscoverSignupResult(BaseModel):
     stopped_reason: str | None = None
 
     signup_url: str | None = None
-    # D-071: which tier of _locate_signup_page's candidate list actually
-    # verified in the browser -- "developer_portal_url" | "link_discovery"
-    # | "guess_list". Surfaced here for the same reason reveal_click_selector
-    # is: so which path won is visible on the result itself, not just in logs.
+    # D-071/D-079: which tier actually verified in the browser --
+    # "developer_portal_url" | "link_discovery" | "guess_list" (plain-fetch
+    # gathered, D-071) or "browser_link_discovery" | "browser_guess_list"
+    # (D-079 Part 2's fallback, only reached when every plain-fetch
+    # candidate was rejected or none existed). Surfaced here for the same
+    # reason reveal_click_selector is: so which path won is visible on the
+    # result itself, not just in logs.
     signup_page_source: str | None = None
     field_map: list[ClassifiedField] = Field(default_factory=list)
     # Dry-run only: selector -> the value that WOULD be filled if this were live.
@@ -173,7 +177,10 @@ _SIGNUP_LINK_RE = re.compile(r"sign.?up|register|get.?started|api.?key|get.?a.?k
 # static link to it). A wrong guess here is safe, not just tolerated: the
 # classification confidence/no-email-field hard stops downstream catch a
 # guess that landed on the wrong page before anything is ever submitted.
-_SIGNUP_PATH_GUESSES = ("/signup", "/sign-up", "/register", "/get-started", "/developers", "/pricing", "/join")
+_SIGNUP_PATH_GUESSES = (
+    "/signup", "/sign-up", "/register", "/get-started", "/developers", "/pricing", "/join",
+    "/api-key", "/developers/signup",
+)
 
 _MIN_USABLE_TEXT_LENGTH = 200
 
@@ -211,32 +218,41 @@ class _AnchorLinkParser(HTMLParser):
             self._current_text_parts = []
 
 
-def _extract_signup_candidate_links(html_text: str, *, base_url: str, vendor_domain: str) -> list[str]:
-    parser = _AnchorLinkParser()
-    try:
-        parser.feed(html_text)
-    except Exception:
-        return []
-
+def _filter_signup_links(
+    raw_links: list[tuple[str, str]], *, base_url: str, vendor_domain: str
+) -> list[str]:
+    """Shared by both link-discovery sources -- the plain-HTML parser below
+    and `_gather_links_via_browser`'s rendered-DOM harvest (D-079's Part 2
+    fix): same signup-shaped regex, same off-domain rejection (a docs page
+    can legitimately link to a third-party's signup flow, e.g. an SSO
+    provider, that is not this vendor's own account creation -- same
+    reasoning as GATE's ToS-link domain filter), same input shape
+    (href, visible_text) so neither source needs its own copy of this
+    logic to drift out of sync with the other."""
     candidates: list[str] = []
     seen: set[str] = set()
-    for href, text in parser.links:
+    for href, text in raw_links:
         if not href or href.lower().startswith(("#", "mailto:", "javascript:", "tel:")):
             continue
         haystack = f"{href} {text}"
         if not _SIGNUP_LINK_RE.search(haystack):
             continue
         absolute = urljoin(base_url, href)
-        # Never trust an off-domain signup link -- same reasoning as GATE's
-        # ToS-link domain filter (a docs page can legitimately link to a
-        # third-party's signup flow, e.g. an SSO provider, that is not this
-        # vendor's own account creation).
         if registrable_domain(absolute) != vendor_domain:
             continue
         if absolute not in seen:
             seen.add(absolute)
             candidates.append(absolute)
     return candidates
+
+
+def _extract_signup_candidate_links(html_text: str, *, base_url: str, vendor_domain: str) -> list[str]:
+    parser = _AnchorLinkParser()
+    try:
+        parser.feed(html_text)
+    except Exception:
+        return []
+    return _filter_signup_links(parser.links, base_url=base_url, vendor_domain=vendor_domain)
 
 
 async def _fetch_usable_page(url: str, *, fetch: FetchProvider) -> tuple[str, str] | None:
@@ -383,6 +399,52 @@ async def _verify_candidates_in_browser(
         if form_ready:
             return url, tier, waited, reveal_clicks
     return None
+
+
+# --- Part 2 fallback (D-079): browser-rendered link discovery -------------
+#
+# `_locate_signup_page` gathers candidates via plain `httpx` fetches only
+# -- deliberately, per its own docstring, since a plain fetch is enough to
+# confirm a URL is real and browser rendering is comparatively expensive.
+# But it means link discovery is blind to any site whose real navigation
+# only exists after JS runs. Found live against coingecko.com: its raw
+# homepage HTML (a normal 200, 27KB response) contains ZERO `<a>` tags at
+# all -- not "no signup-shaped link", literally no anchors of any kind, a
+# pure client-rendered shell. No guess-list addition or regex tweak to the
+# plain-fetch path could ever find a link that isn't in the HTML it fetched.
+#
+# This only runs as a genuine last resort -- after every candidate
+# `_locate_signup_page` gathered has already been tried and rejected --
+# reusing the browser `page` already open for verification rather than
+# opening a second one. `domcontentloaded`, not `networkidle`: also found
+# live against the same page -- CoinGecko's homepage runs a continuous
+# live-price ticker that keeps the network busy indefinitely, so
+# `networkidle` never fires and the navigation times out.
+_BROWSER_LINK_HARVEST_JS = """
+() => Array.from(document.querySelectorAll('a[href]')).map(el => (
+  {href: el.getAttribute('href'), text: (el.innerText || el.textContent || '').trim()}
+))
+"""
+
+
+async def _gather_links_via_browser(page, *, url: str, vendor_domain: str) -> list[str]:
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+    except Exception as exc:
+        logger.info("browser link-discovery homepage unreachable", extra={"url": url, "error": str(exc)})
+        return []
+    await dismiss_cookie_banner(page)
+    await page.wait_for_timeout(1_500)  # let post-load JS finish mounting real nav content
+    try:
+        raw_links = await evaluate_with_navigation_retry(page, _BROWSER_LINK_HARVEST_JS)
+    except Exception as exc:
+        logger.info("browser link-discovery DOM read failed", extra={"url": url, "error": str(exc)})
+        return []
+    return _filter_signup_links(
+        [(raw.get("href"), raw.get("text") or "") for raw in raw_links],
+        base_url=page.url,
+        vendor_domain=vendor_domain,
+    )
 
 
 # --- Step 2: reduce the rendered DOM to a structured element list -------
@@ -927,18 +989,9 @@ async def discover_signup(
     explain.emit(
         ExplainEvent(
             stage=PipelineStage.PROVISION, identity_key=identity_key,
-            message=f"located {len(candidates)} candidate signup page(s)",
+            message=f"located {len(candidates)} candidate signup page(s) via plain fetch",
         )
     )
-    if not candidates:
-        return _result(
-            identity_key,
-            stopped_reason=(
-                "could not locate any reachable candidate signup page -- developer_portal_url was "
-                "absent or unreachable, and no signup-shaped link was found on the docs page, "
-                "homepage, or the guess-list fallback paths"
-            ),
-        )
 
     if not settings.anthropic_api_key:
         raise RuntimeError(
@@ -948,7 +1001,10 @@ async def discover_signup(
         )
     from ..providers.anthropic_signup_analyzer import AnthropicSignupFormAnalyzer
 
-    analyzer = AnthropicSignupFormAnalyzer(api_key=settings.anthropic_api_key.get_secret_value())
+    call_log = LlmCallLog(llm_call_log_path(settings.data_dir, run_id))
+    analyzer = AnthropicSignupFormAnalyzer(
+        api_key=settings.anthropic_api_key.get_secret_value(), call_log=call_log
+    )
 
     from playwright.async_api import async_playwright
 
@@ -966,21 +1022,81 @@ async def discover_signup(
             # -> link_discovery -> guess_list, verifying each with the same
             # readiness+reveal check (D-069/D-070) already trusted downstream
             # to tell a real form apart from page chrome.
-            accepted = await _verify_candidates_in_browser(
-                page, candidates, analyzer=analyzer, identity_key=identity_key, explain=explain,
+            tried: list[tuple[str, str]] = list(candidates)
+            accepted = (
+                await _verify_candidates_in_browser(
+                    page, candidates, analyzer=analyzer, identity_key=identity_key, explain=explain,
+                )
+                if candidates
+                else None
             )
+
+            # D-079 Part 2: on rejection (or on zero plain-fetch candidates
+            # at all, e.g. coingecko.com's zero-anchor client-rendered
+            # homepage), fall through to browser-rendered link discovery on
+            # the resolved domain, then the guess-list paths tried via the
+            # same real browser -- a plain-fetch 403 (bot-detection headers,
+            # not a full JS challenge) doesn't necessarily mean a real
+            # browser navigation also 403s. Each candidate here goes through
+            # the identical render+reveal verification as the first pass;
+            # nothing is accepted without a real form field actually
+            # appearing.
             if accepted is None:
-                displayed = ", ".join(f"{u!r} [{t}]" for u, t in candidates[:10])
-                more = ", ..." if len(candidates) > 10 else ""
+                explain.emit(
+                    ExplainEvent(
+                        stage=PipelineStage.PROVISION, identity_key=identity_key,
+                        message="no candidate verified from plain-fetch discovery -- "
+                        "falling through to browser-rendered link discovery",
+                    )
+                )
+                already = {u for u, _ in tried}
+                homepage_url = f"https://{identity_key}"
+                browser_links = await _gather_links_via_browser(page, url=homepage_url, vendor_domain=identity_key)
+                fallback_links = [(u, "browser_link_discovery") for u in browser_links if u not in already]
+                explain.emit(
+                    ExplainEvent(
+                        stage=PipelineStage.PROVISION, identity_key=identity_key,
+                        message=f"browser-rendered link discovery found {len(fallback_links)} new candidate(s)",
+                    )
+                )
+                if fallback_links:
+                    accepted = await _verify_candidates_in_browser(
+                        page, fallback_links, analyzer=analyzer, identity_key=identity_key, explain=explain,
+                    )
+                    tried.extend(fallback_links)
+
+            if accepted is None:
+                explain.emit(
+                    ExplainEvent(
+                        stage=PipelineStage.PROVISION, identity_key=identity_key,
+                        message="falling through to guess-list paths, tried via real browser navigation",
+                    )
+                )
+                already = {u for u, _ in tried}
+                guess_candidates = [
+                    (f"https://{identity_key}{path}", "browser_guess_list")
+                    for path in _SIGNUP_PATH_GUESSES
+                    if f"https://{identity_key}{path}" not in already
+                ]
+                if guess_candidates:
+                    accepted = await _verify_candidates_in_browser(
+                        page, guess_candidates, analyzer=analyzer, identity_key=identity_key, explain=explain,
+                    )
+                    tried.extend(guess_candidates)
+
+            if accepted is None:
+                displayed = ", ".join(f"{u!r} [{t}]" for u, t in tried[:10])
+                more = ", ..." if len(tried) > 10 else ""
                 return _result(
                     identity_key,
                     stopped_reason=(
-                        f"SIGNUP_FORM_NOT_RENDERED: tried {len(candidates)} candidate signup page(s), "
-                        f"each waiting up to {FORM_READY_TIMEOUT_MS / 1000:.0f}s and attempting a reveal "
-                        f"click before moving on, ({displayed}{more}) -- none ever showed a real "
-                        "text/email/password form field. This is a distinct outcome from a low-confidence "
-                        "classification: every reachable candidate was tried against a real render, not "
-                        "just the first one."
+                        f"SIGNUP_FORM_NOT_RENDERED: tried {len(tried)} candidate signup page(s) across "
+                        "plain-fetch discovery and the browser-rendered fallback (link discovery + "
+                        f"guess list), each waiting up to {FORM_READY_TIMEOUT_MS / 1000:.0f}s and "
+                        f"attempting a reveal click before moving on, ({displayed}{more}) -- none ever "
+                        "showed a real text/email/password form field. This is a distinct outcome from a "
+                        "low-confidence classification: every reachable candidate across every tier was "
+                        "tried against a real render, not just the first one."
                     ),
                 )
             signup_url, signup_page_source, required_waiting, reveal_clicks = accepted

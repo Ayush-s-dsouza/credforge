@@ -4817,3 +4817,213 @@ credential_vault_ref, not api/credential/tos -- so it's rendered by its
 own branch, not forced into the artifact box), and zero browser console
 errors. 322/322 tests pass (1 new: `register_recipe` adds to an
 already-constructed driver).
+
+### D-078: removed the one vendor-derived example from the reveal-trigger prompt
+
+**The gap:** the Part 1 audit (this session) found that
+`identify_reveal_trigger`'s prompt (`anthropic_signup_analyzer.py`)
+illustrated its instructions with `"e.g. a 'Sign Up' or 'Generate API
+Key' nav link"`. "Generate API Key" is not a generic phrase invented for
+the prompt -- it is NASA's actual, literal reveal-trigger button text
+(the case D-070 was built for). Every other hardcoded string in the
+generation path had already been shown to be structural, not
+vendor-derived; this one wasn't, and the user asked for it gone.
+
+**The fix:** the example was deleted outright, not replaced with a
+different (still vendor-flavored) example. The prompt now describes the
+target purely structurally -- "an element whose apparent purpose is to
+open, reveal, or navigate to a registration or credential-request form,
+rather than appearing on a timer" -- with no illustrative label text of
+any kind, real or invented. An invented example would have removed the
+NASA-specific leak but kept the same failure mode (biasing the model
+toward whatever phrasing the example used); a purely structural
+description has nothing to anchor on.
+
+**Verified by live re-test, not just by reading the prompt.** Re-ran
+`identify_reveal_trigger` against the same live `finnhub.io/signup` page
+used in the Part 1 audit (43 real candidates, unchanged). Before the fix:
+selected `a[href='/register']`, confidence 0.75, reasoning citing 'Get
+free API key'/'Register'. After the fix (hint removed): selected the
+same `a[href='/register']`, confidence **0.97** (higher, not lower), with
+reasoning quoting the same real page text ('Get free API key',
+'Register', 'Get Started') and no trace of the removed example phrase.
+Confirms the correct selection was never dependent on the example --
+removing it cost nothing and closes the leak. Full test suite still
+322/322 (no test asserted on the removed prompt text; the only tests
+referencing "Generate API Key" cover `_build_reveal_selector`, an
+unrelated pure function, and were untouched).
+
+### D-079: every LLM call in the generation path now logs to a redacted JSONL audit trail
+
+**The gap:** Part 1's audit reported, as its most concrete finding, that
+tonight's original three generation runs left literally no trace of
+their LLM calls anywhere -- once the process exited, the only way to see
+what a run's prompts/responses looked like was to call the LLM again
+against the (possibly since-changed) live page and hope it behaved the
+same way. No past run could ever be audited. The user asked for this
+fixed directly: every request and response logged to the run directory
+as JSONL, with prompt, raw response, parsed result, confidence, and
+timing -- both to make a past run auditable, and because it's the only
+data that could ever let the generator's prompts be improved from real
+usage instead of guesswork.
+
+**New module, `pipeline/llm_call_log.py`.** `LlmCallLog(path)` appends
+one JSON line per call to `<data_dir>/runs/<run_id>/llm_calls.jsonl`
+(`llm_call_log_path()` builds that path, matching the existing
+`data_dir/runs/<run_id>/...` layout `report.py`/`orchestrator.py` already
+use for artifacts). `LlmCallLog(path=None)` (`NULL_LLM_CALL_LOG`, the
+default) is a safe no-op -- every call site can call `.record()`
+unconditionally, same pattern as `explain.py`'s `NULL_EXPLAIN`.
+
+**Two independent redaction layers, same reasoning as `redaction.py`'s
+own two-layer design (D-004):** `scrub_secrets()` catches any value
+already registered as a real, confirmed credential. A second, broader
+heuristic (`_CREDENTIAL_SHAPED_RE`: 16+ characters of letters/digits/-/_
+containing at least one of each) catches long token-looking runs the
+model may quote in an *unconfirmed* context -- this matters most for
+`locate_credential`, whose prompt is literally the real post-submit
+page/email text and may contain the actual live credential value before
+extraction has run and `register_secret()` has ever been called on it.
+`scrub_secrets()` alone can't protect a value it doesn't know about yet;
+the shape heuristic is the only thing that can.
+
+**`AnthropicSignupFormAnalyzer`** (`providers/anthropic_signup_analyzer.py`)
+now takes an optional `call_log: LlmCallLog` and, after every one of its
+three real API calls, records `kind`, the exact `prompt` string sent,
+the model's literal `raw_response` text (`response.content`'s text
+block, read directly -- not a re-serialization of the parsed Pydantic
+object, even though the two are supposed to agree for a well-formed
+response), the `parsed_result` (redacted JSON dump), `confidence` (when
+the schema has one; `None` for `CredentialLocationFinding`, which
+doesn't), wall-clock `duration_ms` (`time.monotonic()` around the API
+call only, not DOM work around it), and `input_tokens`/`output_tokens`.
+`discover_signup()` constructs the logger once per run
+(`LlmCallLog(llm_call_log_path(settings.data_dir, run_id))`) and passes
+it into the analyzer -- every LLM call the generator makes for that run
+lands in that run's own file.
+
+**Verified two ways.** (1) 11 new tests, all offline, no live LLM: 7 for
+`LlmCallLog` directly (writes expected fields, appends rather than
+overwrites, registered-secret redaction, shape-heuristic redaction on an
+unregistered synthetic key, a plain-English prompt passes through
+untouched, path layout, no-op on `path=None`), 4 for
+`AnthropicSignupFormAnalyzer`'s real wiring against a mocked
+`messages.parse` (prompt/response actually reach the log file with the
+right `kind`/`confidence`/tokens; `locate_credential`'s prompt redacts a
+synthetic credential-shaped string that was never registered -- proving
+the two-layer design actually needs both layers). 333/333 total. (2) A
+real, non-mocked run: `AnthropicSignupFormAnalyzer` with a real
+`LlmCallLog` against real live `resend.com/signup` and `finnhub.io/signup`
+pages (same two pages as the Part 1 audit and D-078's re-test) produced
+a real two-line JSONL file with real prompts, real raw model responses,
+real confidence (0.75 and 0.95) and timing (9923ms, 3634ms) and token
+counts. This run surfaced one honest, unplanned finding: the shape
+heuristic redacted a substring of a Medium blog-post URL
+(`https://medium.com/@stock-api/...`) present in Finnhub's own link list,
+a false positive -- the URL slug happened to be 16+ mixed
+letters-and-digits, the exact shape a real credential has. This is the
+correct failure direction for a defense-in-depth redaction layer
+(over-redaction is safe; under-redaction is the failure that matters)
+and is called out here rather than quietly left for someone else to
+notice later: a future reader of a logged prompt may see
+`***REDACTED-SHAPED***` in place of an ordinary URL, not just a real
+secret.
+
+### D-080: locator fallback -- browser-rendered link discovery, diagnosed before fixed
+
+**The ask:** "Hit CoinGecko tonight and Alpha Vantage earlier. When the
+located page has no real form, there's no fallback. Fix: on rejection,
+fall through to link-discovery on the resolved domain, then a guess list
+(/signup, /register, /get-started, /api-key, /developers/signup). Render
+and verify a real form is present before accepting. Log which path
+produced the accepted URL."
+
+**Diagnosed live before writing any fix, because the literal ask
+("missing guess-list entries") didn't match what D-071 already does.**
+D-071 already gathers `developer_portal_url` -> `link_discovery` ->
+`guess_list` and verifies each against a real render before accepting
+(`_locate_signup_page` + `_verify_candidates_in_browser`) -- so "there's
+no fallback" needed checking against what CoinGecko actually did
+tonight, not assumed. Three live probes, in order:
+1. `_locate_signup_page("coingecko.com", ...)` against the real RESOLVE-
+   discovered `developer_portal_url` (`https://docs.coingecko.com/docs/sdk`,
+   a docs page): every one of the 7 (now 9) guess-list paths returned
+   **HTTP 403, a 106-byte body** -- a bot-block page, not a 404. Alpha
+   Vantage, run through the same probe, still succeeded immediately from
+   `developer_portal_url` (unaffected, no bug there).
+2. The raw homepage HTML (`https://coingecko.com`, plain `httpx` fetch,
+   200, 27KB) contains **zero `<a href>` tags of any kind** -- not "no
+   signup-shaped link," literally no anchors at all. A pure
+   client-rendered SPA shell. No guess-list addition or regex tweak to a
+   plain-fetch-based link-discovery path could ever have found a link
+   that plainly isn't in the HTML it fetched.
+3. A real headless Playwright browser navigating to `/register` and
+   `/en/developers/dashboard` got the same block, this time visibly a
+   **Cloudflare "Just a moment..." challenge page** -- confirming the
+   guess-paths are WAF-protected against automation generally, not just
+   against plain `httpx`. Separately, `page.goto(..., wait_until=
+   "networkidle")` on the homepage **timed out at 30s** -- CoinGecko runs
+   a continuous live-price ticker that keeps the network busy
+   indefinitely, so `networkidle` never fires; `domcontentloaded` does.
+
+**The real gap, then, is structural, not a short guess list:** link
+discovery is blind on any JS-rendered site because it only ever reads a
+plain fetch's raw HTML. The fix adds a genuine new capability -- browser-
+rendered link discovery -- not just two new strings.
+
+**Implementation (`discover_signup.py`):** `_extract_signup_candidate_links`
+(plain-HTML) and a new `_gather_links_via_browser` (rendered-DOM) now
+share one filter, `_filter_signup_links` (same `_SIGNUP_LINK_RE` +
+off-domain rejection, refactored out so the two sources can't drift
+apart). `_gather_links_via_browser` navigates the already-open Playwright
+`page` (`domcontentloaded`, not `networkidle`, per finding 3 above) and
+harvests real anchors after JS has run. `_SIGNUP_PATH_GUESSES` gained the
+two literal paths asked for (`/api-key`, `/developers/signup`). In
+`discover_signup()`, this only runs as a genuine last resort -- **on
+rejection of every plain-fetch candidate, or when there were none at
+all** -- reusing the same open browser: browser-rendered link discovery
+first, then the (now 9-path) guess list tried via real browser
+navigation rather than a plain fetch (finding 3: a plain-fetch 403 from
+basic bot-detection headers doesn't necessarily mean a real browser
+navigation also 403s, even though it does for CoinGecko specifically,
+which is WAF-challenged, not just header-sniffed). Every candidate at
+every tier goes through the identical render+reveal verification as the
+first pass -- nothing is ever accepted without a real form field actually
+appearing. "Log which path produced the accepted URL" was already
+D-071's `signup_page_source` field plus the explain-stream's "candidate
+ACCEPTED" message; the two new tiers (`browser_link_discovery`,
+`browser_guess_list`) just extend that same existing mechanism, no new
+plumbing needed.
+
+**Verified two ways.** (1) 4 new tests, offline: `_filter_signup_links`
+(off-domain + non-signup-shaped rejection, relative/absolute dedup) and
+`_gather_links_via_browser` against a real (but local, `data:` URL,
+zero-network) Playwright page whose anchors are added by a delayed
+`<script>` -- reproducing the exact CoinGecko shape (nothing in the
+initial DOM, real links only after JS runs) -- plus a not-reachable-URL
+case returning `[]` cleanly. Same real-Playwright-in-tests pattern
+`test_playwright_browser.py` already uses (`data:` URL fixtures, no
+mocked page object). 337/337 total. (2) A real, live, end-to-end
+`discover_signup("CoinGecko", ..., live=False)` run -- full real
+RESOLVE/DISCOVER/CLASSIFY/GATE (GATE cleared AUTO), then the fallback
+observed actually executing in order: `developer_portal_url` tried and
+rejected -> "falling through to browser-rendered link discovery" ->
+found 0 new candidates (CoinGecko's own rendered nav has no
+signup/developer-shaped link at all, a separate honest finding from the
+WAF issue) -> "falling through to guess-list paths, tried via real
+browser navigation" -> all 9 guess paths tried and rejected (each a
+Cloudflare challenge page, no real form) -> `stopped_reason` correctly
+lists all 10 candidates tried across every tier. Re-ran the same
+lower-level probe against `alphavantage.co` with the new code afterward:
+still accepted immediately from `developer_portal_url`, fallback tiers
+never invoked -- no regression.
+
+**Honest bottom line, reported plainly rather than papered over:**
+CoinGecko is still unreachable through the web path, and this fix
+doesn't change that. The fallback now runs, is real, and would help any
+vendor whose problem was actually "JS-rendered nav, no WAF" -- but
+CoinGecko's actual blocker is a Cloudflare bot-challenge on its
+account/developer paths, which no locator fallback can or should try to
+bypass. This is exactly the account-creation-defended pattern Part 3
+predicts and is meant to route around by targeting form-to-key vendors
+instead, not more locator engineering on an already-defended one.
