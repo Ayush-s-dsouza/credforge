@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from ..enums import ApiStyle, AuthScheme, CredentialType, ReasonCode, SourceTier, Status
 from ..providers.browser import ProvisionStepResult
-from ..providers.llm import DiscoveryExtraction
+from ..providers.llm import AuthRequirement, DiscoveryExtraction
 
 
 class ResolveCandidate(BaseModel):
@@ -76,6 +76,11 @@ class ClassifyResult(BaseModel):
     # None = confident classification; CLASSIFY_LOW_CONFIDENCE otherwise.
     reason_code: ReasonCode | None = None
     auth_scheme: AuthScheme | None = None  # None only if the extractor's answer was unparseable
+    # D-068: required/optional/none -- independent of auth_scheme, which
+    # answers "what credential is there to acquire," not "is one strictly
+    # necessary." None only alongside auth_scheme=None (extractor's answer
+    # was unparseable) or when DISCOVER found no public API at all.
+    auth_required: AuthRequirement | None = None
     redirect_uris_required: bool = False
     scopes_available: list[str] = Field(default_factory=list)
     # The *adjusted* confidence -- source-tier weighting (D-049) already

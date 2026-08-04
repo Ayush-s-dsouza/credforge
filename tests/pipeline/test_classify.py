@@ -55,6 +55,38 @@ async def test_classifies_every_auth_scheme_value_with_high_confidence(scheme: A
 
 
 @pytest.mark.asyncio
+async def test_auth_required_is_passed_through_from_the_extractor() -> None:
+    # D-068: auth_required is an independent signal from auth_scheme --
+    # must survive classify() unchanged, not be dropped or recomputed.
+    discovery = DiscoveryExtraction(has_public_api=True)
+    extractor = FakeExtractor(ClassifyExtraction(auth_scheme="api_key", auth_required="optional", confidence=0.95))
+
+    result = await classify(
+        "example.com", docs_text="x", docs_url="https://example.com", discovery=discovery,
+        source_tier=classify_source_tier("https://example.com"), extractor=extractor,
+    )
+
+    assert result.auth_scheme == AuthScheme.API_KEY
+    assert result.auth_required == "optional"
+
+
+@pytest.mark.asyncio
+async def test_auth_required_defaults_to_required_when_extractor_omits_it() -> None:
+    # ClassifyExtraction.auth_required defaults to "required" -- a caller
+    # that never learned about D-068 (an older fixture, a minimal fake)
+    # still gets a real, conservative value, not a silent None.
+    discovery = DiscoveryExtraction(has_public_api=True)
+    extractor = FakeExtractor(ClassifyExtraction(auth_scheme="api_key", confidence=0.95))
+
+    result = await classify(
+        "example.com", docs_text="x", docs_url="https://example.com", discovery=discovery,
+        source_tier=classify_source_tier("https://example.com"), extractor=extractor,
+    )
+
+    assert result.auth_required == "required"
+
+
+@pytest.mark.asyncio
 async def test_low_confidence_is_flagged_not_silently_trusted() -> None:
     # This is the expected default with the heuristic extractor (always 0.5).
     discovery = DiscoveryExtraction(has_public_api=True)

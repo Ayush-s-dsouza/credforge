@@ -83,6 +83,20 @@ async def test_classification_falls_back_to_no_public_api_when_nothing_found() -
 
 
 @pytest.mark.asyncio
+async def test_classification_always_reports_auth_required_as_required() -> None:
+    # D-068: the heuristic has no reliable way to tell required apart from
+    # optional auth from keyword matches alone -- "required" is the
+    # honest, conservative default it always reports.
+    extractor = HeuristicExtractor()
+    discovery = await extractor.extract_discovery(docs_text=API_KEY_DOCS, docs_url="https://docs.weather.example.com")
+    classification = await extractor.extract_classification(
+        docs_text=API_KEY_DOCS, docs_url="https://docs.weather.example.com", discovery=discovery
+    )
+
+    assert classification.auth_required == "required"
+
+
+@pytest.mark.asyncio
 async def test_tos_prohibition_is_detected_with_evidence() -> None:
     extractor = HeuristicExtractor()
     result = await extractor.extract_tos_gate_signals(

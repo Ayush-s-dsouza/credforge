@@ -86,6 +86,7 @@ def _build_from_gate(state: AppPipelineState, *, credforge_version: str) -> Hand
             base_url=extraction.base_url if extraction else None,
             developer_portal_url=extraction.developer_portal_url if extraction else None,
             auth_scheme=state.classify.auth_scheme if state.classify else None,
+            auth_required=state.classify.auth_required if state.classify else None,
             rate_limit_notes=extraction.rate_limit_notes if extraction else None,
             pagination_style_hint=extraction.pagination_style_hint if extraction else None,
             validation_endpoint=extraction.validation_endpoint if extraction else None,

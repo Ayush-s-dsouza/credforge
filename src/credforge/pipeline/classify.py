@@ -112,6 +112,7 @@ async def classify(
     return ClassifyResult(
         reason_code=reason_code,
         auth_scheme=auth_scheme,
+        auth_required=extraction.auth_required,
         redirect_uris_required=extraction.redirect_uris_required,
         scopes_available=extraction.scopes_available,
         confidence=adjusted_confidence,

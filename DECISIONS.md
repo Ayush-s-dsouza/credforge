@@ -3998,3 +3998,94 @@ table's own "before/after" comparison shows the identical pattern for
 apps untouched by that change either). Every one of the four
 directly-attributed moves was confirmed by inspecting the real artifact's
 own evidence/tos fields, not inferred from the status change alone.
+
+### D-068: `auth_required` (required|optional|none) alongside `auth_scheme` -- a real API can be both keyless and credential-bearing, and the schema had no slot for that
+
+**Found live, not designed speculatively:** six consecutive DISCOVER_SIGNUP
+attempts against NASA (unpinned) split down the middle -- three hit real
+RESOLVE candidate-ranking variance (landing on `sti.nasa.gov/for-developers/`
+instead of `api.nasa.gov`), but the other three reached GATE `AUTO` twice
+with CLASSIFY concluding `auth_scheme=none`, correctly out of scope for a
+generator that only builds form-to-key recipes. That "none" reading isn't
+noise -- it's a defensible answer to a genuinely ambiguous real sentence on
+NASA's own docs page: *"You do not need to authenticate in order to explore
+the NASA data. However, if you will be intensively using the APIs... you
+should sign up for a NASA developer key."* NASA's API is authentically
+both keyless AND credential-bearing, and `auth_scheme` -- a single enum
+value -- has no way to represent that; every run re-derives the answer
+fresh (unlike a hand-authored, human-pinned recipe, which never
+re-litigates it), so an unpinned exploration hits this ambiguity every
+single time, not once.
+
+**The rule (verbatim, as specified):** `auth_scheme=none` means no
+credential exists to acquire at all -- reserved for a genuinely open API
+like Open-Meteo. If a credential is available at all, even when
+unauthenticated access also works, classify by that credential's real
+scheme, because credforge's entire job is acquiring credentials and one
+exists to acquire. A new field, `auth_required: "required" | "optional" |
+"none"`, carries the distinction `auth_scheme` alone flattens away.
+
+**Where it lives:** `ClassifyExtraction.auth_required` (the LLM's raw
+answer, `providers/llm.py`) -> `ClassifyResult.auth_required`
+(`classify.py` passes it straight through, no recomputation) ->
+`ApiInfo.auth_required` (`emit.py`, alongside `auth_scheme` in the final
+artifact). `AnthropicExtractor`'s classification prompt states the rule
+explicitly, with the NASA sentence as the worked example, and asks for
+`auth_required` as a genuinely separate judgment, not derived from
+`auth_scheme` after the fact. `HeuristicExtractor` -- which never produced
+`AuthScheme.NONE` on its own even before this change -- reports
+`auth_required="required"` unconditionally: a keyword hint list has no way
+to tell required apart from optional auth from surrounding prose, and
+"required" is the honest, conservative default rather than a guess.
+
+**A real, higher-stakes consequence than DISCOVER_SIGNUP's own scope
+check:** `provision()`'s existing `auth_scheme == AuthScheme.NONE`
+short-circuit (`pipeline/provision.py`) trivially completes with
+`credential_type=NONE` and vaults nothing -- correct for a genuinely open
+API, silently wrong for one that's merely *usable* without a key. Before
+this fix, a real `credforge run "NASA API" --live` hitting the same
+`auth_scheme=none` misclassification would have skipped real credential
+acquisition entirely, not just tripped DISCOVER_SIGNUP's archetype
+boundary -- this was a live PROVISION-stage correctness bug for the
+standard pipeline, found as a side effect of debugging the generator, not
+something DISCOVER_SIGNUP-specific.
+
+**Verified live against two vendors, not just NASA -- and one result
+directly contradicts a stated expectation, reported as found, not
+smoothed over:** calling the real, fixed `AnthropicExtractor` directly
+against each vendor's real fetched docs text (`api.nasa.gov`, browser-
+rendered per D-066; `open-meteo.com/en/docs`, plain fetch):
+
+- **NASA**: `auth_scheme=api_key`, `auth_required=optional`,
+  confidence=0.97 -- exactly the intended fix.
+- **Open-Meteo**: `auth_scheme=api_key`, `auth_required=optional`,
+  confidence=0.9 -- **not** `none`, contradicting the stated expectation
+  that Open-Meteo "must stay none." Checked why, not assumed: Open-Meteo's
+  real docs page describes a real `apikey` query parameter, *"Only
+  required to commercial use to access reserved API resources for
+  customers. The server URL requires the prefix `customer-`..."* --
+  Open-Meteo has the exact same authentically-dual shape as NASA (free,
+  keyless for non-commercial use; a real, optional, acquirable credential
+  for commercial use), and the new classification is the *more* accurate
+  read of what's actually on the page, not a regression. Reported plainly
+  rather than treated as a passing/failing test outcome to reconcile
+  quietly -- the fix generalized to a second vendor nobody had specifically
+  re-tested against this exact question before, and it happened to
+  disagree with a guess about what that vendor would do.
+
+**Rejected: inferring `auth_required` from `auth_scheme` after the fact
+with a heuristic** (e.g. "if the docs also mention free/anonymous access
+alongside a credential, call it optional"). Real prose doesn't reliably
+signal this pattern in a fixed, checkable way across vendors (NASA says
+"you do not need to authenticate"; Open-Meteo says "only required for
+commercial use" -- different phrasing, same underlying fact) -- exactly
+the kind of judgment call this project reserves for the LLM, not a
+keyword list, the same reasoning `HeuristicExtractor`'s existing
+limitations already establish for every other nuanced field.
+
+**Verified:** 299/299 tests pass (3 new: `auth_required` passed through
+`classify()` unchanged, defaults to `"required"` when an extractor omits
+it, `HeuristicExtractor` always reports `"required"`). Both schema paths
+(`ClassifyExtraction`, `ClassifyResult`, `ApiInfo`) accept the new field
+with a safe default, so no existing fixture or test construction needed
+updating.

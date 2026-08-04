@@ -17,6 +17,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..enums import ApiStyle, AuthScheme, CredentialType, ReasonCode, SourceTier, Status
+from ..providers.llm import AuthRequirement
 from .state import CompletenessGap, EvidenceItem, TosStatus
 
 
@@ -30,6 +31,13 @@ class ApiInfo(BaseModel):
     base_url: str | None = None
     developer_portal_url: str | None = None
     auth_scheme: AuthScheme | None = None
+    # D-068: required/optional/none -- auth_scheme alone answers "what
+    # credential is there to acquire," not "is one strictly necessary."
+    # An API that works fully anonymously but also offers a real,
+    # acquirable credential (NASA's api.nasa.gov) is auth_scheme=api_key,
+    # auth_required="optional" -- neither field alone would tell a
+    # consumer the whole story.
+    auth_required: AuthRequirement | None = None
     rate_limit_notes: str | None = None
     pagination_style_hint: str | None = None
     validation_endpoint: str | None = None

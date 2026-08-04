@@ -134,8 +134,17 @@ class HeuristicExtractor:
         auth_scheme = next((v for h, v in _AUTH_HINTS if _contains_hint(lower, h)), None)
         if auth_scheme is None:
             auth_scheme = AuthScheme.NO_PUBLIC_API if not discovery.has_public_api else AuthScheme.API_KEY
+        # D-068: the heuristic has no reliable way to distinguish
+        # required-vs-optional auth from keyword matches alone (that
+        # distinction needs real reading comprehension of the surrounding
+        # prose, not a hint list) -- "required" is the honest, conservative
+        # default whenever a real auth-scheme hint matched, matching this
+        # extractor's existing behavior of never producing AuthScheme.NONE
+        # on its own.
+        auth_required = "required"
         return ClassifyExtraction(
             auth_scheme=auth_scheme.value,
+            auth_required=auth_required,
             redirect_uris_required=_contains_hint(lower, "redirect_uri") or _contains_hint(lower, "callback url"),
             scopes_available=[],  # heuristics can't reliably enumerate scopes
             confidence=0.5,  # heuristic classification is always medium-confidence at best
