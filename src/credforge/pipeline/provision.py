@@ -55,6 +55,7 @@ from ..redaction import register_secret
 from ..registry.store import AppendOnlyRegistry
 from ..vault.crypto_vault import FernetVault
 from ..vault.secret_ref import make_vault_ref
+from .explain import NULL_EXPLAIN, ExplainSink
 
 _PASSWORD_BYTES = 18  # ~24 chars of base64url -- comfortably strong, no vendor has ever rejected it for being too long in testing
 
@@ -91,6 +92,7 @@ async def provision(
     run_id: str,
     settings_fingerprint: str,
     headed: bool = False,
+    explain: ExplainSink = NULL_EXPLAIN,
 ) -> ProvisionResult:
     existing = registry.find_open_provision(identity_key)
     if existing is not None:
@@ -126,6 +128,7 @@ async def provision(
         redirect_uris=redirect_uris,
         account_password=account_password,
         headed=headed,
+        explain=explain,
     )
 
     if not outcome.success:

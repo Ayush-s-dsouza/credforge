@@ -104,6 +104,65 @@ async def test_recipe_with_no_extraction_mechanism_fails_instead_of_reporting_em
 
 
 @pytest.mark.asyncio
+async def test_failure_captures_current_url_page_excerpt_and_screenshot(tmp_path) -> None:
+    # D-076: found necessary debugging a real deployed failure (Alpha
+    # Vantage on Railway) that produced no exception and no server-side
+    # detail -- credential=null with nothing to diagnose it by. A failed
+    # attempt now records what the page actually looked like.
+    recipe = SignupRecipe(
+        email_field_selector="#email",
+        submit_selector="#submit",
+        credential_type=CredentialType.API_KEY,
+        docs_url="https://developer.example.com/docs",
+    )
+    driver = PlaywrightBrowserDriver(recipes={_BARE_FORM_HTML: recipe}, screenshot_dir=tmp_path)
+
+    outcome = await driver.signup_and_create_app(
+        developer_portal_url=_BARE_FORM_HTML,
+        email_alias="credforge+example@example.com",
+        email_provider=MockEmailProvider(),
+        app_display_name="Example App",
+        redirect_uris=[],
+        account_password="generated-pw-abc123",
+        headed=False,
+    )
+
+    assert outcome.success is False
+    assert outcome.failure_current_url is not None
+    assert outcome.failure_page_text_excerpt is not None
+    assert outcome.failure_screenshot_path is not None
+    screenshot_path = tmp_path / outcome.failure_screenshot_path
+    assert screenshot_path.exists()
+    assert screenshot_path.stat().st_size > 0
+
+
+@pytest.mark.asyncio
+async def test_no_screenshot_dir_configured_means_no_screenshot_attempted() -> None:
+    recipe = SignupRecipe(
+        email_field_selector="#email",
+        submit_selector="#submit",
+        credential_type=CredentialType.API_KEY,
+        docs_url="https://developer.example.com/docs",
+    )
+    driver = PlaywrightBrowserDriver(recipes={_BARE_FORM_HTML: recipe})  # no screenshot_dir
+
+    outcome = await driver.signup_and_create_app(
+        developer_portal_url=_BARE_FORM_HTML,
+        email_alias="credforge+example@example.com",
+        email_provider=MockEmailProvider(),
+        app_display_name="Example App",
+        redirect_uris=[],
+        account_password="generated-pw-abc123",
+        headed=False,
+    )
+
+    assert outcome.success is False
+    assert outcome.failure_screenshot_path is None
+    # Failure URL/excerpt are still captured -- only the screenshot is gated.
+    assert outcome.failure_current_url is not None
+
+
+@pytest.mark.asyncio
 async def test_page_based_extraction_strips_trailing_sentence_punctuation() -> None:
     # D-074: found live replaying a DISCOVER_SIGNUP-generated Alpha Vantage
     # recipe -- the real post-submit page read "...API key: XJ7QP2KD9M.

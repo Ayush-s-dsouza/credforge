@@ -9,7 +9,8 @@ stubbed-by-default scoping decision (see DECISIONS.md D-031).
 
 import uuid
 
-from ..enums import CredentialType
+from ..enums import CredentialType, PipelineStage
+from ..pipeline.explain import NULL_EXPLAIN, ExplainEvent, ExplainSink
 from .browser import ProvisionOutcome, ProvisionStepResult
 from .email import EmailProvider
 
@@ -25,6 +26,7 @@ class MockBrowserDriver:
         redirect_uris: list[str],
         account_password: str,
         headed: bool,
+        explain: ExplainSink = NULL_EXPLAIN,
     ) -> ProvisionOutcome:
         steps = [
             ProvisionStepResult(step="navigate_to_signup", success=True),
@@ -32,6 +34,14 @@ class MockBrowserDriver:
             ProvisionStepResult(step="verify_email", success=True),
             ProvisionStepResult(step="create_oauth_app", success=True, detail=f"name={app_display_name}"),
         ]
+        for step in steps:
+            explain.emit(
+                ExplainEvent(
+                    stage=PipelineStage.PROVISION,
+                    identity_key=developer_portal_url,
+                    message=f"[mocked] {step.step}" + (f": {step.detail}" if step.detail else ""),
+                )
+            )
         return ProvisionOutcome(
             success=True,
             credential_type=CredentialType.OAUTH2_TOKEN_PAIR,

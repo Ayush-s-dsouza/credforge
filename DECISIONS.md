@@ -4622,3 +4622,99 @@ resolves `alphavantage.co` to the recipe with `generated_by="discover_signup"`,
 confirmed by direct inspection of the constructed `PlaywrightBrowserDriver`'s
 recipe dict. 319/319 tests pass (1 changed: `merge_recipes`' precedence
 test now asserts the reversed behavior).
+
+**Postscript, found deploying D-075:** the deployed instance's own live
+Alpha Vantage test failed twice (`credential: null`, no exception, nothing
+in `railway logs`) while the exact same recipe succeeded cleanly from a
+local run seconds later. The user explicitly rejected inferring a cause
+(Railway datacenter IP reputation) from the absence of evidence, and
+named a more testable alternative -- Playwright-in-Docker divergence
+(headless UA, fonts, viewport, container timing) -- and required
+measuring it, not guessing. That instrumentation is D-076.
+
+### D-076: stream every provisioning step over SSE, and capture what a failure actually looked like
+
+**Why this exists:** a real deployed failure (D-075's postscript, above)
+produced nothing to diagnose it by -- not an exception, not a log line,
+not a field in the artifact beyond `credential: null`. Two motivations,
+not one: this is a debugging necessity (what did the vendor's page
+actually show the deployed instance?) and, independently, the actual
+demo feature Stage 3 needs -- watching DISCOVER_SIGNUP explore an unseen
+vendor live is the whole point of putting it on the web.
+
+**`ExplainSink` (RESOLVE/DISCOVER/CLASSIFY/GATE's existing streaming
+mechanism, D-036) now reaches PROVISION and DISCOVER_SIGNUP too.**
+Previously stopped at GATE -- `BrowserDriver.signup_and_create_app` and
+`discover_signup()` had no way to report progress mid-run at all, only a
+single result at the very end. `BrowserDriver`'s Protocol (`providers/browser.py`)
+gained `explain: ExplainSink = NULL_EXPLAIN`, threaded through
+`PlaywrightBrowserDriver` (real steps: navigate, reveal-click, async-render
+wait, fill+submit, extract -- each via a `_record_step()` closure that
+both appends the existing `ProvisionStepResult` and emits an `ExplainEvent`,
+so the two never drift apart) and `MockBrowserDriver` (its four simulated
+steps, prefixed `[mocked]` so a viewer never confuses simulated progress
+for real). `provision.py` and `orchestrator.py`'s existing `provision(...)`
+call now pass `explain` through, closing the one gap in an otherwise
+fully-streamed pipeline. `discover_signup()` itself gained the same
+parameter and now emits at every meaningful point in the sequence the
+user specified: locating (candidate count, then each candidate tried/
+accepted/rejected inside `_verify_candidates_in_browser`), reading the
+form (element count, then classified field count + confidence + blockers),
+filling, submitting, extracting, and recipe-written (with the real path).
+A `_result()` closure wraps every `DiscoverSignupResult` construction that
+carries a `stopped_reason` and emits it automatically -- every stop
+streams itself, not just the ones a developer remembered to instrument.
+
+**On any provisioning failure, what the page actually looked like is
+captured, not just that it failed.** `ProvisionOutcome` gained
+`failure_current_url`/`failure_page_text_excerpt`/`failure_screenshot_path`.
+`PlaywrightBrowserDriver`'s `_outcome()` closure (already the single choke
+point for every return, D-073/D-075) is now `async` and, whenever
+`success=False`, best-effort captures `page.url`, a 500-char body excerpt
+(re-scrubbed through `scrub_secrets` -- "this is the layer that leaked
+before" was the user's own framing, and it's treated as exactly that
+seriously: redacted at the point of capture, and AGAIN at
+`SSEExplainSink.emit()`, which previously dropped `event.detail` -- the
+whole payload -- on the floor before this fix, meaning even a
+correctly-redacted detail dict would never have reached a client anyway),
+and (if `screenshot_dir` was configured) a PNG via `page.screenshot()`.
+`factory.py` configures `screenshot_dir=settings.data_dir / "screenshots"`
+for the web deployment specifically -- `None` (no screenshot ever
+attempted) remains the CLI-default, unaffected. A new `GET
+/api/screenshot/{filename}` endpoint (webapp/main.py) serves them,
+independently re-validating the filename against
+`^[A-Za-z0-9._-]+\.png$` rather than trusting the producer side's own
+sanitization -- a client-supplied filename is a directory-traversal
+surface regardless of how careful the writer was. The frontend renders a
+clickable "screenshot of the failure" link, the current URL, and the page
+excerpt directly under the failure message that reported them.
+
+**The browser's own fingerprint is logged at launch, measured, not
+inferred.** Right after `page = await browser.new_page()`,
+`navigator.userAgent` and `page.viewport_size` are logged
+(`logging.getLogger("credforge.playwright_browser")`, visible via
+`railway logs`) and streamed via `explain` too -- directly answering
+the user's instruction to compare local vs. deployed instead of guessing
+at IP reputation. Not yet compared (that requires triggering another
+live attempt, held per the user's own "Alpha Vantage is burned" ruling)
+-- the instrumentation is what's shipped here; the comparison is whatever
+vendor Stage 3's live test ends up using.
+
+**A real, unrelated bug found writing this feature's own test:** the
+first version of the screenshot-filename test failed with Windows'
+`NotADirectoryError(20, ...)` -- traced to `_BARE_FORM_HTML`'s "domain"
+being the entire raw `data:` URL string (registrable_domain() falls back
+to returning a data: URL verbatim, confirmed harmless for every OTHER
+existing use of that fixture, since none of them build a filename from
+it). Real vendor domains are always filesystem-safe, but nothing enforced
+that as an invariant -- `re.sub(r"[^A-Za-z0-9._-]", "_", domain)[:80]`
+now sanitizes defensively before it's ever used in a path, rather than
+letting an unusual `identity_key` silently take down the one feature this
+entry exists to add.
+
+**Verified:** 321/321 tests pass (2 new: a failure captures current_url/
+page_excerpt/screenshot when a `screenshot_dir` is configured, and the
+screenshot specifically is skipped -- not attempted, not silently
+swallowed -- when it isn't). `webapp/main.py` still imports cleanly and
+registers `/api/screenshot/{filename}` as a real route, checked directly
+rather than assumed.

@@ -121,7 +121,11 @@ def build_providers(settings: Settings, *, live: bool = False) -> ProviderBundle
             **load_generated_recipes(_COMMITTED_EXAMPLES_DIR),
         }
         recipes = merge_recipes(generated_recipes, LIVE_SIGNUP_RECIPES)
-        browser = PlaywrightBrowserDriver(recipes=recipes)
+        # D-076: screenshots on provisioning failure, saved next to
+        # generated recipes under the same ephemeral data_dir -- fine for
+        # this since a screenshot is a debugging aid for THIS process's own
+        # failures, not something that needs to survive a redeploy.
+        browser = PlaywrightBrowserDriver(recipes=recipes, screenshot_dir=settings.data_dir / "screenshots")
     else:
         email = MockEmailProvider(alias_domain=settings.email_alias_domain)
         browser = MockBrowserDriver()

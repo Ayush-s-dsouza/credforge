@@ -89,6 +89,7 @@ from ..registry.store import AppendOnlyRegistry
 from ..utils.domains import registrable_domain
 from ..vault.crypto_vault import FernetVault
 from ..vault.secret_ref import make_vault_ref
+from .explain import NULL_EXPLAIN, ExplainEvent, ExplainSink
 from .orchestrator import run_app, settings_fingerprint
 from .validate import validate
 
@@ -326,7 +327,8 @@ async def _locate_signup_page(
 
 
 async def _verify_candidates_in_browser(
-    page, candidates: list[tuple[str, str]], *, analyzer: SignupFormAnalyzer, identity_key: str
+    page, candidates: list[tuple[str, str]], *, analyzer: SignupFormAnalyzer, identity_key: str,
+    explain: ExplainSink = NULL_EXPLAIN,
 ) -> tuple[str, str, bool, list[str]] | None:
     """Tries each `_locate_signup_page` candidate against a REAL browser, in
     the order given -- the actual acceptance test, not a keyword match on
@@ -339,12 +341,24 @@ async def _verify_candidates_in_browser(
     first candidate that shows a real field, or None if none of them ever
     did."""
     for url, tier in candidates:
+        explain.emit(
+            ExplainEvent(
+                stage=PipelineStage.PROVISION, identity_key=identity_key,
+                message=f"trying candidate signup page: {url} [{tier}]",
+            )
+        )
         try:
             await page.goto(url)
         except Exception as exc:
             logger.info(
                 "signup-page candidate unreachable in browser",
                 extra={"identity_key": identity_key, "url": url, "source_tier": tier, "error": str(exc)},
+            )
+            explain.emit(
+                ExplainEvent(
+                    stage=PipelineStage.PROVISION, identity_key=identity_key,
+                    message=f"candidate unreachable in browser: {url} ({exc})",
+                )
             )
             continue
         await dismiss_cookie_banner(page)
@@ -356,6 +370,15 @@ async def _verify_candidates_in_browser(
         logger.info(
             "signup-page candidate accepted" if form_ready else "signup-page candidate rejected",
             extra={"identity_key": identity_key, "url": url, "source_tier": tier, "accepted": form_ready},
+        )
+        explain.emit(
+            ExplainEvent(
+                stage=PipelineStage.PROVISION, identity_key=identity_key,
+                message=(
+                    f"candidate {'ACCEPTED' if form_ready else 'rejected (no real form field found)'}: {url}"
+                    + (f" (clicked to reveal: {reveal_clicks})" if reveal_clicks and form_ready else "")
+                ),
+            )
         )
         if form_ready:
             return url, tier, waited, reveal_clicks
@@ -815,7 +838,24 @@ async def discover_signup(
     run_id: str,
     live: bool,
     headed: bool = False,
+    explain: ExplainSink = NULL_EXPLAIN,
 ) -> DiscoverSignupResult:
+    # D-076: this is the actual demo -- every stop, not just successes,
+    # gets streamed with its stopped_reason so a viewer can watch WHY
+    # generation didn't reach a recipe, not just that it didn't.
+    # identity_key isn't known until after the first `run_app` call below,
+    # so this closure is defined there, not at the top of the function.
+    def _result(identity_key: str, **kwargs) -> DiscoverSignupResult:
+        result = DiscoverSignupResult(identity_key=identity_key, dry_run=not live, **kwargs)
+        if result.stopped_reason:
+            explain.emit(
+                ExplainEvent(
+                    stage=PipelineStage.PROVISION, identity_key=identity_key,
+                    message=f"generation stopped: {result.stopped_reason}",
+                )
+            )
+        return result
+
     # Reuse the real pipeline through GATE rather than re-deriving it --
     # dry_run=True means PROVISION never runs and nothing has touched a
     # vault/browser/email yet, exactly the precondition state
@@ -824,34 +864,34 @@ async def discover_signup(
     # recipe -- nothing below can change it.
     state, _artifact = await run_app(
         app_name, providers=providers, settings=settings, registry=registry, run_id=run_id,
-        data_dir=settings.data_dir, vault=None, dry_run=True, live=False,
+        data_dir=settings.data_dir, vault=None, dry_run=True, live=False, explain=explain,
     )
 
     identity_key = state.identity_key
 
     if state.gate is None or state.gate.status != Status.AUTO:
         gate_status = state.gate.status if state.gate else None
-        return DiscoverSignupResult(
-            identity_key=identity_key, dry_run=not live,
+        return _result(
+            identity_key,
             stopped_reason=f"GATE did not clear AUTO (status={gate_status!r}) -- nothing to generate",
         )
 
     from ..providers.signup_recipes import LIVE_SIGNUP_RECIPES
 
     if identity_key in LIVE_SIGNUP_RECIPES:
-        return DiscoverSignupResult(
-            identity_key=identity_key, dry_run=not live,
+        return _result(
+            identity_key,
             stopped_reason=f"a hand-authored recipe already exists for {identity_key!r} -- nothing to generate",
         )
     if identity_key in load_generated_recipes(settings.data_dir):
-        return DiscoverSignupResult(
-            identity_key=identity_key, dry_run=not live,
+        return _result(
+            identity_key,
             stopped_reason=f"a generated recipe already exists for {identity_key!r} -- nothing to generate",
         )
 
     if registry.find_open_provision(identity_key) is not None:
-        return DiscoverSignupResult(
-            identity_key=identity_key, dry_run=not live,
+        return _result(
+            identity_key,
             stopped_reason=(
                 f"{identity_key!r} already has an open provisioned credential in the registry -- "
                 "idempotency guard, no browser action taken"
@@ -860,8 +900,8 @@ async def discover_signup(
 
     auth_scheme = state.classify.auth_scheme if state.classify else None
     if auth_scheme not in (AuthScheme.API_KEY, AuthScheme.BEARER_STATIC):
-        return DiscoverSignupResult(
-            identity_key=identity_key, dry_run=not live,
+        return _result(
+            identity_key,
             stopped_reason=(
                 f"classified auth_scheme={auth_scheme!r} -- DISCOVER_SIGNUP only covers the "
                 "signup-form-to-key/token archetype every existing recipe already uses; an OAuth "
@@ -874,13 +914,25 @@ async def discover_signup(
     docs_url = state.discovery.docs_url if state.discovery else None
     docs_html = state.discovery.docs_text if state.discovery else None
 
+    explain.emit(
+        ExplainEvent(
+            stage=PipelineStage.PROVISION, identity_key=identity_key,
+            message="locating signup page: gathering candidates (developer_portal_url, link discovery, guess-list)",
+        )
+    )
     candidates = await _locate_signup_page(
         identity_key, developer_portal_url=developer_portal_url, docs_url=docs_url, docs_html=docs_html,
         fetch=providers.fetch,
     )
+    explain.emit(
+        ExplainEvent(
+            stage=PipelineStage.PROVISION, identity_key=identity_key,
+            message=f"located {len(candidates)} candidate signup page(s)",
+        )
+    )
     if not candidates:
-        return DiscoverSignupResult(
-            identity_key=identity_key, dry_run=not live,
+        return _result(
+            identity_key,
             stopped_reason=(
                 "could not locate any reachable candidate signup page -- developer_portal_url was "
                 "absent or unreachable, and no signup-shaped link was found on the docs page, "
@@ -915,13 +967,13 @@ async def discover_signup(
             # readiness+reveal check (D-069/D-070) already trusted downstream
             # to tell a real form apart from page chrome.
             accepted = await _verify_candidates_in_browser(
-                page, candidates, analyzer=analyzer, identity_key=identity_key
+                page, candidates, analyzer=analyzer, identity_key=identity_key, explain=explain,
             )
             if accepted is None:
                 displayed = ", ".join(f"{u!r} [{t}]" for u, t in candidates[:10])
                 more = ", ..." if len(candidates) > 10 else ""
-                return DiscoverSignupResult(
-                    identity_key=identity_key, dry_run=not live,
+                return _result(
+                    identity_key,
                     stopped_reason=(
                         f"SIGNUP_FORM_NOT_RENDERED: tried {len(candidates)} candidate signup page(s), "
                         f"each waiting up to {FORM_READY_TIMEOUT_MS / 1000:.0f}s and attempting a reveal "
@@ -939,7 +991,22 @@ async def discover_signup(
             _check_structural_payment_fields(elements)
             _check_structural_captcha_fields(elements)
 
+            explain.emit(
+                ExplainEvent(
+                    stage=PipelineStage.PROVISION, identity_key=identity_key,
+                    message=f"reading form: {len(elements)} DOM element(s) found on {signup_url}, classifying...",
+                )
+            )
             classification = await analyzer.classify_signup_form(url=signup_url, elements=elements)
+            explain.emit(
+                ExplainEvent(
+                    stage=PipelineStage.PROVISION, identity_key=identity_key,
+                    message=(
+                        f"classified {len(classification.field_map)} field(s) "
+                        f"(confidence={classification.confidence}, blockers={classification.blockers})"
+                    ),
+                )
+            )
             _check_llm_hard_stops(classification, confidence_threshold=_FORM_CLASSIFICATION_CONFIDENCE_THRESHOLD)
 
             # A short, per-run suffix -- NOT the stable alias a registered
@@ -962,12 +1029,23 @@ async def discover_signup(
             account_password = _generate_account_password()
             register_secret(account_password)  # before it's ever handed to Playwright
 
+            explain.emit(
+                ExplainEvent(
+                    stage=PipelineStage.PROVISION, identity_key=identity_key,
+                    message=f"filling {len(classification.field_map)} field(s) with alias {email_alias}",
+                )
+            )
             await _fill_classified_fields(
                 page, classification, elements, email_alias=email_alias, account_password=account_password
             )
             for checkbox_selector in classification.required_checkboxes:
                 await page.check(checkbox_selector)
             await page.click(classification.submit_selector)
+            explain.emit(
+                ExplainEvent(
+                    stage=PipelineStage.PROVISION, identity_key=identity_key, message="submitted signup form",
+                )
+            )
 
             # Same reasoning as PlaywrightBrowserDriver's own AJAX-poll
             # (playwright_browser.py) -- a same-page credential render has
@@ -975,6 +1053,12 @@ async def discover_signup(
             await page.wait_for_timeout(1500)
             post_submit_text = await page.text_content("body") or ""
 
+            explain.emit(
+                ExplainEvent(
+                    stage=PipelineStage.PROVISION, identity_key=identity_key,
+                    message="extracting credential: reading the post-submit page",
+                )
+            )
             finding = await analyzer.locate_credential(context_label="the post-submit page", content=post_submit_text)
 
             page_regex: str | None = None
@@ -985,8 +1069,8 @@ async def discover_signup(
                 page_regex = _build_anchored_regex(finding.anchor_text)
                 extracted = _extract_anchored_value(page_regex, post_submit_text)
                 if extracted is None:
-                    return DiscoverSignupResult(
-                        identity_key=identity_key, dry_run=False, signup_url=signup_url,
+                    return _result(
+                        identity_key, signup_url=signup_url,
                         stopped_reason=(
                             f"the LLM reported a credential on the page anchored on {finding.anchor_text!r}, "
                             "but the derived regex found no match against the real page text -- the LLM's "
@@ -996,19 +1080,25 @@ async def discover_signup(
                 raw_credential_value = extracted
             elif finding.location == "email":
                 requires_email_verification = True
+                explain.emit(
+                    ExplainEvent(
+                        stage=PipelineStage.PROVISION, identity_key=identity_key,
+                        message=f"credential delivered by email -- waiting for a message to {email_alias}",
+                    )
+                )
                 try:
                     message = await providers.email.wait_for_message(to_addr=email_alias)
                 except EmailTimeoutError:
-                    return DiscoverSignupResult(
-                        identity_key=identity_key, dry_run=False, signup_url=signup_url,
+                    return _result(
+                        identity_key, signup_url=signup_url,
                         stopped_reason=f"page said to check email, but no message arrived at {email_alias!r} in time",
                     )
                 email_finding = await analyzer.locate_credential(
                     context_label="the verification email", content=message.body_text
                 )
                 if not email_finding.found or not email_finding.anchor_text:
-                    return DiscoverSignupResult(
-                        identity_key=identity_key, dry_run=False, signup_url=signup_url,
+                    return _result(
+                        identity_key, signup_url=signup_url,
                         stopped_reason=(
                             f"email arrived but no credential anchor identified in its body: "
                             f"{email_finding.detail or 'no detail given'}"
@@ -1017,8 +1107,8 @@ async def discover_signup(
                 email_regex = _build_anchored_regex(email_finding.anchor_text)
                 extracted = _extract_anchored_value(email_regex, message.body_text)
                 if extracted is None:
-                    return DiscoverSignupResult(
-                        identity_key=identity_key, dry_run=False, signup_url=signup_url,
+                    return _result(
+                        identity_key, signup_url=signup_url,
                         stopped_reason=(
                             f"the LLM reported a credential in the email anchored on "
                             f"{email_finding.anchor_text!r}, but the derived regex found no match against "
@@ -1027,8 +1117,8 @@ async def discover_signup(
                     )
                 raw_credential_value = extracted
             else:
-                return DiscoverSignupResult(
-                    identity_key=identity_key, dry_run=False, signup_url=signup_url,
+                return _result(
+                    identity_key, signup_url=signup_url,
                     stopped_reason=f"no credential found on the page or in email: {finding.detail or 'no detail given'}",
                 )
 
@@ -1036,6 +1126,12 @@ async def discover_signup(
             assert vault is not None  # required by the caller whenever live=True, same as provision()
             api_key_ref = make_vault_ref(identity_key, "api_key")
             vault.store(api_key_ref, {"api_key": raw_credential_value})
+            explain.emit(
+                ExplainEvent(
+                    stage=PipelineStage.PROVISION, identity_key=identity_key,
+                    message="credential extracted and vaulted",
+                )
+            )
 
             credential_type = CredentialType.API_KEY if auth_scheme == AuthScheme.API_KEY else CredentialType.BEARER_TOKEN
 
@@ -1048,6 +1144,12 @@ async def discover_signup(
                 reveal_click_selector=reveal_click_selector,
             )
             recipe_path = save_generated_recipe(settings.data_dir, identity_key, recipe)
+            explain.emit(
+                ExplainEvent(
+                    stage=PipelineStage.PROVISION, identity_key=identity_key,
+                    message=f"recipe written: {recipe_path}",
+                )
+            )
 
             registry.append(
                 RegistryEntry(
@@ -1084,8 +1186,8 @@ async def discover_signup(
                 validate_status=validate_result.status, validate_detail=validate_result.detail,
             )
         except HardStopError as exc:
-            return DiscoverSignupResult(
-                identity_key=identity_key, dry_run=not live,
+            return _result(
+                identity_key,
                 stopped_reason=f"hard stop: {exc.reason}" + (f" ({exc.evidence})" if exc.evidence else ""),
             )
         except PageNavigatedUnexpectedlyError as exc:
@@ -1095,16 +1197,12 @@ async def discover_signup(
             # after evaluate_with_navigation_retry's own settle-and-retry
             # already failed once, so it's a genuine, distinct outcome, not
             # folded into the generic catch-all below.
-            return DiscoverSignupResult(
-                identity_key=identity_key, dry_run=not live,
-                stopped_reason=f"PAGE_NAVIGATED_UNEXPECTEDLY: {exc}",
-            )
+            return _result(identity_key, stopped_reason=f"PAGE_NAVIGATED_UNEXPECTEDLY: {exc}")
         except Exception as exc:  # noqa: BLE001 -- an unexpected Playwright/page error is a real, reportable
             # finding, not a crash -- same "one exploration attempt's failure never takes down the caller"
             # principle signup_and_create_app's own broad except already applies for a hand-authored recipe.
-            return DiscoverSignupResult(
-                identity_key=identity_key, dry_run=not live,
-                stopped_reason=f"unexpected error during generation: {type(exc).__name__}: {exc}",
+            return _result(
+                identity_key, stopped_reason=f"unexpected error during generation: {type(exc).__name__}: {exc}",
             )
         finally:
             await browser.close()

@@ -190,12 +190,21 @@ class SSEExplainSink:
         self.start = start
 
     def emit(self, event: ExplainEvent) -> None:
+        # D-076: event.detail (current_url/page_excerpt/screenshot filename
+        # on a provisioning failure) was previously dropped entirely --
+        # this is the layer that made a real deployed failure
+        # undiagnosable from the client side. Re-scrubbed here too, not
+        # just trusted from the source -- the same defense-in-depth
+        # already applied to `message` and everywhere else a secret could
+        # reach a response body.
+        detail = {k: (scrub_secrets(v) if isinstance(v, str) else v) for k, v in event.detail.items()}
         self.queue.put_nowait(
             {
                 "type": "stage",
                 "stage": event.stage.value,
                 "identity_key": event.identity_key,
                 "message": scrub_secrets(event.message),
+                "detail": detail,
                 "elapsed_ms": int((time.monotonic() - self.start) * 1000),
             }
         )
@@ -270,6 +279,25 @@ def examples() -> dict:
         "nasa_live_credential": json.loads(nasa_path.read_text(encoding="utf-8")) if nasa_path.exists() else None,
         "hitl_task_etsy": hitl_path.read_text(encoding="utf-8") if hitl_path.exists() else None,
     }
+
+
+# D-076: filenames come back from PlaywrightBrowserDriver's own sanitized
+# generation (`[A-Za-z0-9._-]` only, see playwright_browser.py), but this
+# endpoint re-validates independently rather than trusting that -- the
+# client supplies this value, and a permissive check here would be a
+# directory-traversal hole regardless of how careful the producer side is.
+_SCREENSHOT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.png$")
+
+
+@app.get("/api/screenshot/{filename}")
+def screenshot(filename: str, k: str | None = Query(None)) -> FileResponse:
+    _check_token(k)
+    if not _SCREENSHOT_NAME_RE.match(filename):
+        raise HTTPException(400, "invalid screenshot filename")
+    path = settings.data_dir / "screenshots" / filename
+    if not path.is_file():
+        raise HTTPException(404, "no screenshot with that name -- it may have been from a prior deploy (ephemeral storage)")
+    return FileResponse(path, media_type="image/png")
 
 
 @app.post("/api/run")

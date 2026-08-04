@@ -24,16 +24,22 @@ never needs the package or its browser binaries. See OPS.md's Playwright
 section for what installing it actually requires on the host.
 """
 
+import logging
 import re
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from ..enums import CredentialType
+from ..enums import CredentialType, PipelineStage
+from ..pipeline.explain import NULL_EXPLAIN, ExplainEvent, ExplainSink
+from ..redaction import scrub_secrets
 from ..utils.domains import registrable_domain
 from .browser import ProvisionOutcome, ProvisionStepResult
 from .email import EmailProvider
+
+logger = logging.getLogger("credforge.playwright_browser")
 
 # The identity credforge signs up with when a vendor's form asks for a
 # person's name -- not a real person, and deliberately not disguised as
@@ -345,8 +351,18 @@ class SignupRecipe(BaseModel):
 
 
 class PlaywrightBrowserDriver:
-    def __init__(self, *, recipes: dict[str, SignupRecipe] | None = None) -> None:
+    def __init__(
+        self, *, recipes: dict[str, SignupRecipe] | None = None, screenshot_dir: Path | None = None
+    ) -> None:
         self._recipes = recipes or {}
+        # D-076: optional -- None (the CLI-default case) means no screenshot
+        # is ever taken, same behavior as before this existed. Set by
+        # factory.py for the web deployment specifically, so a live
+        # provisioning failure leaves visual evidence of what the vendor
+        # actually served, retrievable without SSH/log access. Found
+        # necessary debugging a real deployed failure (Alpha Vantage on
+        # Railway) that produced no exception and no server-side detail.
+        self._screenshot_dir = screenshot_dir
 
     async def signup_and_create_app(
         self,
@@ -358,10 +374,17 @@ class PlaywrightBrowserDriver:
         redirect_uris: list[str],
         account_password: str,
         headed: bool,
+        explain: ExplainSink = NULL_EXPLAIN,
     ) -> ProvisionOutcome:
         domain = registrable_domain(developer_portal_url)
         recipe = self._recipes.get(domain)
         if recipe is None:
+            explain.emit(
+                ExplainEvent(
+                    stage=PipelineStage.PROVISION, identity_key=domain,
+                    message=f"no SignupRecipe registered for {domain!r} -- provisioning not attempted",
+                )
+            )
             return ProvisionOutcome(
                 success=False,
                 credential_type=CredentialType.NONE,
@@ -373,25 +396,95 @@ class PlaywrightBrowserDriver:
                 failure_reason=f"no per-vendor signup recipe registered for {domain!r}",
             )
 
-        # D-075: every ProvisionOutcome built from here on -- success or
-        # failure -- carries which recipe drove the attempt, so a viewer
-        # never has to guess whether a hand-written or a DISCOVER_SIGNUP-
-        # generated recipe was actually used.
-        def _outcome(**kwargs) -> ProvisionOutcome:
+        from playwright.async_api import async_playwright
+
+        steps: list[ProvisionStepResult] = []
+
+        def _record_step(step: str, success: bool, detail: str | None = None) -> None:
+            steps.append(ProvisionStepResult(step=step, success=success, detail=detail))
+            explain.emit(
+                ExplainEvent(
+                    stage=PipelineStage.PROVISION, identity_key=domain,
+                    message=f"{step}: {'ok' if success else 'FAILED'}" + (f" -- {detail}" if detail else ""),
+                )
+            )
+
+        async def _outcome(**kwargs) -> ProvisionOutcome:
+            # D-075: every ProvisionOutcome built from here on -- success or
+            # failure -- carries which recipe drove the attempt, so a viewer
+            # never has to guess whether a hand-written or a
+            # DISCOVER_SIGNUP-generated recipe was actually used.
+            #
+            # D-076: on failure, capture what the page actually looked like
+            # -- current URL, a redacted text excerpt, and (if a directory
+            # was configured) a screenshot -- so a real deployed failure is
+            # diagnosable from the artifact/stream alone, not just "it
+            # failed." Best-effort: a screenshot/read failure here must
+            # never mask the real ProvisionOutcome underneath it.
+            if not kwargs.get("success", True):
+                try:
+                    kwargs["failure_current_url"] = page.url
+                    body_text = await page.text_content("body") or ""
+                    kwargs["failure_page_text_excerpt"] = scrub_secrets(body_text[:500])
+                except Exception:
+                    pass
+                if self._screenshot_dir is not None:
+                    try:
+                        self._screenshot_dir.mkdir(parents=True, exist_ok=True)
+                        # domain is usually a clean registrable domain
+                        # ("alphavantage.co"), but isn't guaranteed to be
+                        # filesystem-safe in every edge case (e.g. a data:
+                        # URL, which registrable_domain() falls back to
+                        # returning verbatim) -- sanitized defensively
+                        # rather than letting an unusual identity_key take
+                        # down the one thing this feature exists to produce.
+                        safe_domain = re.sub(r"[^A-Za-z0-9._-]", "_", domain)[:80]
+                        screenshot_name = f"{safe_domain}-{uuid.uuid4().hex[:8]}.png"
+                        await page.screenshot(path=str(self._screenshot_dir / screenshot_name))
+                        kwargs["failure_screenshot_path"] = screenshot_name
+                    except Exception as exc:
+                        logger.warning("screenshot capture failed", extra={"domain": domain, "error": str(exc)})
+                explain.emit(
+                    ExplainEvent(
+                        stage=PipelineStage.PROVISION, identity_key=domain,
+                        message=f"provisioning failed: {kwargs.get('failure_reason')}",
+                        detail={
+                            "current_url": kwargs.get("failure_current_url"),
+                            "page_excerpt": kwargs.get("failure_page_text_excerpt"),
+                            "screenshot": kwargs.get("failure_screenshot_path"),
+                        },
+                    )
+                )
             return ProvisionOutcome(
                 recipe_generated_by=recipe.generated_by, recipe_generated_at=recipe.generated_at, **kwargs
             )
 
-        from playwright.async_api import async_playwright
-
-        steps: list[ProvisionStepResult] = []
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=not headed)
             try:
                 page = await browser.new_page()
+
+                # D-076: the same recipe succeeded from a local run and
+                # failed on the deployed instance with no exception --
+                # comparing the real browser fingerprint each environment
+                # actually launches is the direct way to confirm or rule
+                # out a Playwright-in-Docker rendering/UA divergence,
+                # instead of inferring it from an absence of evidence.
+                user_agent = await page.evaluate("() => navigator.userAgent")
+                viewport = page.viewport_size
+                logger.info(
+                    "browser launched", extra={"domain": domain, "user_agent": user_agent, "viewport": viewport}
+                )
+                explain.emit(
+                    ExplainEvent(
+                        stage=PipelineStage.PROVISION, identity_key=domain,
+                        message=f"browser launched: user_agent={user_agent!r} viewport={viewport}",
+                    )
+                )
+
                 await page.goto(developer_portal_url)
                 await dismiss_cookie_banner(page)
-                steps.append(ProvisionStepResult(step="navigate_to_signup", success=True))
+                _record_step("navigate_to_signup", True)
 
                 if recipe.reveal_click_selector:
                     # D-070: this recipe's own generation run found the
@@ -400,15 +493,10 @@ class PlaywrightBrowserDriver:
                     # live, NASA's own "Generate API Key" nav link).
                     try:
                         await page.click(recipe.reveal_click_selector, timeout=5_000)
-                        steps.append(
-                            ProvisionStepResult(
-                                step="reveal_signup_form", success=True,
-                                detail=f"clicked {recipe.reveal_click_selector!r}",
-                            )
-                        )
+                        _record_step("reveal_signup_form", True, detail=f"clicked {recipe.reveal_click_selector!r}")
                     except Exception as exc:
-                        steps.append(ProvisionStepResult(step="reveal_signup_form", success=False, detail=str(exc)))
-                        return _outcome(
+                        _record_step("reveal_signup_form", False, detail=str(exc))
+                        return await _outcome(
                             success=False,
                             credential_type=CredentialType.NONE,
                             steps=steps,
@@ -425,14 +513,11 @@ class PlaywrightBrowserDriver:
                     # rendered its real fields yet.
                     form_ready, _ = await wait_for_signup_form_ready(page)
                     if not form_ready:
-                        steps.append(
-                            ProvisionStepResult(
-                                step="wait_for_signup_form_ready",
-                                success=False,
-                                detail=f"no visible form field appeared within {FORM_READY_TIMEOUT_MS / 1000:.0f}s",
-                            )
+                        _record_step(
+                            "wait_for_signup_form_ready", False,
+                            detail=f"no visible form field appeared within {FORM_READY_TIMEOUT_MS / 1000:.0f}s",
                         )
-                        return _outcome(
+                        return await _outcome(
                             success=False,
                             credential_type=CredentialType.NONE,
                             steps=steps,
@@ -441,7 +526,7 @@ class PlaywrightBrowserDriver:
                                 "form, but no visible field appeared within the wait window"
                             ),
                         )
-                    steps.append(ProvisionStepResult(step="wait_for_signup_form_ready", success=True))
+                    _record_step("wait_for_signup_form_ready", True)
 
                 await page.fill(recipe.email_field_selector, email_alias)
                 if recipe.first_name_field_selector:
@@ -473,7 +558,7 @@ class PlaywrightBrowserDriver:
                     await page.check(checkbox_selector)
 
                 await page.click(recipe.submit_selector)
-                steps.append(ProvisionStepResult(step="fill_and_submit_signup_form", success=True))
+                _record_step("fill_and_submit_signup_form", True)
 
                 raw_api_credential: dict[str, str] = {}
 
@@ -492,14 +577,11 @@ class PlaywrightBrowserDriver:
                     # the success return below with an empty
                     # raw_api_credential -- a false "provisioned" that
                     # vaults nothing. See DECISIONS.md D-053.
-                    steps.append(
-                        ProvisionStepResult(
-                            step="extract_credential",
-                            success=False,
-                            detail="recipe has no configured extraction mechanism for this credential_type",
-                        )
+                    _record_step(
+                        "extract_credential", False,
+                        detail="recipe has no configured extraction mechanism for this credential_type",
                     )
-                    return _outcome(
+                    return await _outcome(
                         success=False,
                         credential_type=CredentialType.NONE,
                         steps=steps,
@@ -514,38 +596,24 @@ class PlaywrightBrowserDriver:
                     message = await email_provider.wait_for_message(
                         to_addr=email_alias, subject_contains=recipe.email_subject_contains
                     )
-                    steps.append(
-                        ProvisionStepResult(
-                            step="receive_credential_email", success=True, detail=f"message_id={message.message_id}"
-                        )
-                    )
+                    _record_step("receive_credential_email", True, detail=f"message_id={message.message_id}")
                     match = re.search(recipe.api_key_email_regex, message.body_text)
                     if match is None:
-                        steps.append(
-                            ProvisionStepResult(
-                                step="extract_credential_from_email",
-                                success=False,
-                                detail="regex did not match the email body",
-                            )
-                        )
-                        return _outcome(
+                        _record_step("extract_credential_from_email", False, detail="regex did not match the email body")
+                        return await _outcome(
                             success=False,
                             credential_type=CredentialType.NONE,
                             steps=steps,
                             failure_reason="signup email arrived but the credential regex found no match",
                         )
                     raw_api_credential["api_key"] = match.group(1).rstrip(_TRAILING_PUNCTUATION)
-                    steps.append(ProvisionStepResult(step="extract_credential_from_email", success=True))
+                    _record_step("extract_credential_from_email", True)
                 elif recipe.client_id_selector or recipe.client_secret_selector or recipe.api_key_page_selector:
                     if recipe.requires_email_verification:
                         message = await email_provider.wait_for_message(
                             to_addr=email_alias, subject_contains=recipe.email_subject_contains or "verify"
                         )
-                        steps.append(
-                            ProvisionStepResult(
-                                step="verify_email", success=True, detail=f"message_id={message.message_id}"
-                            )
-                        )
+                        _record_step("verify_email", True, detail=f"message_id={message.message_id}")
                         # A real recipe would also extract and visit the verification
                         # link from message.body_text here. Left as the natural next
                         # step once a real recipe exists to test it against -- see
@@ -577,14 +645,11 @@ class PlaywrightBrowserDriver:
                         if recipe.api_key_page_regex:
                             page_match = re.search(recipe.api_key_page_regex, page_text)
                             if page_match is None:
-                                steps.append(
-                                    ProvisionStepResult(
-                                        step="extract_credential",
-                                        success=False,
-                                        detail="api_key_page_regex did not match the page content",
-                                    )
+                                _record_step(
+                                    "extract_credential", False,
+                                    detail="api_key_page_regex did not match the page content",
                                 )
-                                return _outcome(
+                                return await _outcome(
                                     success=False,
                                     credential_type=CredentialType.NONE,
                                     steps=steps,
@@ -593,9 +658,9 @@ class PlaywrightBrowserDriver:
                             raw_api_credential["api_key"] = page_match.group(1).rstrip(_TRAILING_PUNCTUATION)
                         else:
                             raw_api_credential["api_key"] = page_text
-                    steps.append(ProvisionStepResult(step="extract_credential", success=True))
+                    _record_step("extract_credential", True)
 
-                return _outcome(
+                return await _outcome(
                     success=True,
                     credential_type=recipe.credential_type,
                     raw_api_credential=raw_api_credential,
@@ -604,8 +669,8 @@ class PlaywrightBrowserDriver:
                     steps=steps,
                 )
             except Exception as exc:
-                steps.append(ProvisionStepResult(step="browser_automation", success=False, detail=str(exc)))
-                return _outcome(
+                _record_step("browser_automation", False, detail=str(exc))
+                return await _outcome(
                     success=False, credential_type=CredentialType.NONE, steps=steps, failure_reason=str(exc)
                 )
             finally:

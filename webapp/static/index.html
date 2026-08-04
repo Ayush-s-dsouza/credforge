@@ -270,6 +270,21 @@ async function runApp() {
           appendLine(`<strong style="${evt.live ? 'color:#dc2626' : 'opacity:.75'}">${escapeHtml(evt.message)}</strong>`);
         } else if (evt.type === 'stage') {
           appendLine(`<span class="stage">[${evt.stage}]</span> ${escapeHtml(evt.identity_key)}: ${escapeHtml(evt.message)} <span class="ms">${evt.elapsed_ms}ms</span>`);
+          // D-076: a provisioning-failure event carries current_url/
+          // page_excerpt/screenshot -- render them right under the
+          // message that reported the failure, not just leave the raw
+          // artifact JSON as the only place to find them.
+          const detail = evt.detail || {};
+          if (detail.current_url) {
+            appendLine(`<span class="warn" style="opacity:.85">&nbsp;&nbsp;at URL: ${escapeHtml(detail.current_url)}</span>`);
+          }
+          if (detail.page_excerpt) {
+            appendLine(`<span class="warn" style="opacity:.85">&nbsp;&nbsp;page said: "${escapeHtml(detail.page_excerpt)}"</span>`);
+          }
+          if (detail.screenshot) {
+            const shotUrl = `/api/screenshot/${encodeURIComponent(detail.screenshot)}?k=${encodeURIComponent(TOKEN)}`;
+            appendLine(`&nbsp;&nbsp;<a href="${shotUrl}" target="_blank">screenshot of the failure</a>`);
+          }
         } else if (evt.type === 'search_unavailable') {
           appendLine(`<span class="warn">${escapeHtml(evt.message)}</span>`);
         } else if (evt.type === 'error') {

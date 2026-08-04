@@ -11,6 +11,7 @@ from typing import Protocol
 from pydantic import BaseModel
 
 from ..enums import CredentialType
+from ..pipeline.explain import NULL_EXPLAIN, ExplainSink
 from .email import EmailProvider
 
 
@@ -51,6 +52,19 @@ class ProvisionOutcome(BaseModel):
     recipe_generated_by: str | None = None
     recipe_generated_at: datetime | None = None
 
+    # D-076: populated only on a failed attempt (success=False), so a
+    # viewer of a live/streamed run can see what actually went wrong
+    # without SSH/log access -- found necessary debugging a real deployed
+    # failure (Alpha Vantage on Railway) that produced no exception, no
+    # server-side detail, and a client-visible result of just
+    # `credential: null`. `failure_screenshot_path` is a filename only
+    # (not a full path) -- the caller decides where screenshots actually
+    # live; None means no screenshot directory was configured (the default,
+    # CLI-safe case) or the screenshot capture itself failed.
+    failure_current_url: str | None = None
+    failure_page_text_excerpt: str | None = None
+    failure_screenshot_path: str | None = None
+
 
 class BrowserDriver(Protocol):
     async def signup_and_create_app(
@@ -63,4 +77,5 @@ class BrowserDriver(Protocol):
         redirect_uris: list[str],
         account_password: str,
         headed: bool,
+        explain: ExplainSink = NULL_EXPLAIN,
     ) -> ProvisionOutcome: ...

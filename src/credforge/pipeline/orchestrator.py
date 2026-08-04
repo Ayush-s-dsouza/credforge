@@ -156,6 +156,7 @@ async def run_app(
             registry=registry,
             run_id=run_id,
             settings_fingerprint=settings_fingerprint(settings, live=live),
+            explain=explain,
         )
         if state.provision.status in ("provisioned", "already_provisioned"):
             # A credential that hasn't been test-called doesn't count --
