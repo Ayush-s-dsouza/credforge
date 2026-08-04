@@ -5027,3 +5027,54 @@ account/developer paths, which no locator fallback can or should try to
 bypass. This is exactly the account-creation-defended pattern Part 3
 predicts and is meant to route around by targeting form-to-key vendors
 instead, not more locator engineering on an already-defended one.
+
+### D-081: GATE's free-tier override now recognizes price-shaped evidence, not just fixed phrases
+
+**The gap:** Part 3's TheCatAPI test blocked on `requires_payment`
+despite the page showing a genuine, permanent free tier -- "$0.00/Month
+Free FREE cats to help developers learn. 10,000 requests a month." None
+of `_FREE_TIER_OVERRIDE_MARKERS`' fixed phrases ("free tier", "free api
+key", "get started for free", "no credit card required") happen to
+literally appear; a real pricing table's free-tier signal is usually its
+price ($0/$0.00) plus "Free" as the tier's own label, not necessarily
+one of those exact phrases.
+
+**Fix:** `_PRICE_SHAPED_FREE_TIER_RE` in `gate.py` -- requires BOTH a
+zero-price-per-month pattern (`$0`, `$0.00`, or bare `0`, followed by
+`/mo` or `/month`) AND the word "free" within a 20-character window,
+either order (real tables show both: TheCatAPI is price-then-label,
+Postmark's own pricing page is label-then-price, "Free $0.00 /mo").
+Deliberately NOT a bare `$0` anywhere on the page (a stray "$0.99"-shaped
+price elsewhere is meaningless alone) and NOT a bare "free" anywhere (a
+"free trial" is time-limited and must NOT suppress on the word "free"
+alone -- confirmed the regex correctly ignores "Start Free Trial No
+Credit Card Required" with no zero-price nearby). Wired into the same
+`free_tier` boolean `_adjust_for_scoped_gate_signals` already computes,
+alongside the existing marker list and the developer_portal_url/api-key
+check -- same suppression path, same precedence rules, same structural
+exclusion of `prohibits_automation`/`requires_captcha`/
+`requires_sso_only` (D-058) untouched.
+
+**Verified against two real vendor pages, live-fetched, not guessed.**
+TheCatAPI's real pricing text (fetched live) matches the new regex and
+now correctly suppresses `requires_payment`, tested with
+`test_price_shaped_free_tier_suppresses_requires_payment_thecatapi_shaped`.
+Before writing a Postmark regression test, re-ran the real pipeline
+against Postmark live to find its ACTUAL current block reason rather
+than assume: `tos_prohibits_automation`, evidence "Access the Service by
+any means other than through the standard industry-accepted or AC
+PM-approved application program interfaces" from its real ToS page
+(`tos_status: verified_prohibited`) -- not `requires_payment` at all.
+Also live-fetched Postmark's real pricing page and confirmed it
+genuinely contains the new regex's exact trigger pattern ("Free $0.00
+/mo", "Everyone starts on our free Developer tier... 100 emails every
+month... it never expires"). Since `prohibits_automation` is
+structurally excluded from `_SCOPE_SUPPRESSIBLE_FLAGS` (D-058, never
+legitimately "true only for a paid tier"), this real price-shaped text
+can never touch it regardless of proximity -- proven directly with
+`test_price_shaped_free_tier_text_does_not_suppress_a_real_prohibition_postmark_shaped`,
+which puts both the genuine free-tier price text and the genuine
+prohibition sentence in the same source_text (the strongest form of the
+regression) and asserts HITL/`TOS_PROHIBITS_AUTOMATION` is unchanged.
+The existing Etsy regression test (D-057, `prohibits_automation`, an
+unrelated flag) also re-run unaffected. 339/339 total (2 new).

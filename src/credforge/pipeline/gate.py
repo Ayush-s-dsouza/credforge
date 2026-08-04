@@ -190,6 +190,25 @@ _FREE_TIER_OVERRIDE_MARKERS = (
     "no credit card required",
 )
 
+# D-081: found live -- TheCatAPI's real pricing table reads "$0.00/Month
+# Free FREE cats to help developers learn. 10,000 requests a month", which
+# matches none of the literal phrases above, so a genuine, permanent free
+# tier didn't suppress requires_payment. A real pricing table's free-tier
+# language is very often just its price ($0/$0.00) plus the word "free" as
+# the tier's own label/heading -- not necessarily the phrase "free tier".
+# Requires BOTH a zero-price-per-month pattern AND the word "free" within
+# a short window (either order -- real tables show it both ways: TheCatAPI
+# is price-then-label, Postmark's own pricing page is label-then-price,
+# "Free $0.00 /mo") -- deliberately not a bare "free" or bare "$0" alone,
+# since "free trial" (time-limited, still eventually paid) must NOT
+# suppress on the word "free" alone, and a lone "$0.99"-shaped price
+# mention elsewhere on the page is meaningless without "free" nearby.
+_PRICE_SHAPED_FREE_TIER_RE = re.compile(
+    r"\bfree\b[^.\n]{0,20}\$?0(?:\.00)?\s*/\s*(?:mo|month)\b"
+    r"|\$?0(?:\.00)?\s*/\s*(?:mo|month)\b[^.\n]{0,20}\bfree\b",
+    re.IGNORECASE,
+)
+
 
 def _adjust_for_scoped_gate_signals(
     signals: TosGateExtraction,
@@ -206,8 +225,9 @@ def _adjust_for_scoped_gate_signals(
     genuine unscoped access requirement. Checked once, against the whole
     source text, upstream of the individual flags. See DECISIONS.md D-058
     for the real case (and the D-057 case it generalizes) this exists to
-    fix, and the module docstring for why prohibits_automation/
-    requires_captcha/requires_sso_only are never touched here."""
+    fix, D-081 for the price-shaped free-tier extension, and the module
+    docstring for why prohibits_automation/requires_captcha/
+    requires_sso_only are never touched here."""
     active = [flag for flag in _SCOPE_SUPPRESSIBLE_FLAGS if getattr(signals, flag)]
     if not active:
         return signals
@@ -217,8 +237,10 @@ def _adjust_for_scoped_gate_signals(
         return signals  # a real, unscoped block -- never suppressed, recipe-backed or not
 
     scoped = any(marker in lower for marker in _SCOPE_QUALIFIER_MARKERS)
-    free_tier = any(marker in lower for marker in _FREE_TIER_OVERRIDE_MARKERS) or (
-        developer_portal_url is not None and "api-key" in developer_portal_url.lower()
+    free_tier = (
+        any(marker in lower for marker in _FREE_TIER_OVERRIDE_MARKERS)
+        or _PRICE_SHAPED_FREE_TIER_RE.search(lower) is not None
+        or (developer_portal_url is not None and "api-key" in developer_portal_url.lower())
     )
 
     if scoped or free_tier:

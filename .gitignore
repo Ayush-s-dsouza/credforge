@@ -48,6 +48,8 @@ scripts/scratch_part2_coingecko_deep.py
 scripts/scratch_part2_coingecko_browser.py
 scripts/scratch_part2_coingecko_full_flow.py
 scripts/scratch_part3_dryrun.py
+scripts/scratch_part4_postmark_fetch.py
+scripts/scratch_part4_postmark_gate_check.py
 scratch_batch_output/
 
 # personal interview prep, not a submitted deliverable -- kept on a

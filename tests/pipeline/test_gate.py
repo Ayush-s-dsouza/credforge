@@ -519,6 +519,78 @@ async def test_scoped_payment_override_also_applies_to_the_developer_docs_signal
     assert result.tos_status == "unverifiable"
 
 
+# --- D-081: price-shaped free-tier evidence ($0/$0.00/month + "free" as a --
+# pricing-tier label), not just the literal phrases D-057/D-058 already
+# recognized -- found live against TheCatAPI's real pricing page.
+
+_THECATAPI_SHAPED_TEXT = (
+    "The Cat API - Cat as a Service. Start smart, scale efficiently. "
+    "$0.00/Month Free FREE cats to help developers learn. 10,000 requests a month. "
+    "Join our helpful community. Free code samples. Images and breed information. "
+    "Get Commercial Access -- Contact us for pricing. Enterprise: built for your "
+    "business needs with unlimited requests and bandwidth. "
+)
+
+
+@pytest.mark.asyncio
+async def test_price_shaped_free_tier_suppresses_requires_payment_thecatapi_shaped() -> None:
+    # The real live bug: TheCatAPI's real pricing page has a genuine,
+    # permanent $0.00/month free tier (10,000 requests/month) -- but
+    # matches none of the literal _FREE_TIER_OVERRIDE_MARKERS phrases
+    # ("free tier", "free api key", ...), so GATE blocked a vendor with a
+    # real, working free signup path on requires_payment, triggered by the
+    # separate "Contact us for pricing" enterprise-tier language.
+    fetch = FakeFetchProvider({"https://example.com/terms": _ok(_THECATAPI_SHAPED_TEXT)})
+    extractor = FakeExtractor(
+        _clean_tos().model_copy(update={"requires_payment": True, "evidence_snippets": ["Contact us for pricing."]})
+    )
+
+    result = await gate("example.com", discovery=DISCOVERED_OK, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor)
+
+    assert result.status == Status.AUTO
+    assert result.reason_code == ReasonCode.ELIGIBLE_AUTO
+
+
+# --- D-081 regression guard, real vendor: price-shaped text must never -----
+# touch a flag D-058 already excludes from suppression entirely.
+
+_POSTMARK_SHAPED_TEXT = (
+    "Postmark Pricing and Free Trial. Everyone starts on our free Developer "
+    "tier $0.00 /mo which includes 100 emails every month, and it never "
+    "expires or runs out. These are the terms of service governing use of "
+    "this API: Access the Service by any means other than through the "
+    "standard industry-accepted or AC PM-approved application program "
+    "interfaces is prohibited. " * 2
+)
+
+
+@pytest.mark.asyncio
+async def test_price_shaped_free_tier_text_does_not_suppress_a_real_prohibition_postmark_shaped() -> None:
+    # Postmark's real pricing page genuinely contains the exact price-shaped
+    # free-tier language D-081 now detects ("$0.00 /mo" next to "free") --
+    # and its real ToS separately, genuinely prohibits automated account
+    # creation (live-verified: GATE correctly blocks Postmark today on
+    # tos_prohibits_automation). prohibits_automation is structurally
+    # excluded from _SCOPE_SUPPRESSIBLE_FLAGS -- never legitimately "true
+    # only for a paid tier" -- so price-shaped evidence anywhere in the
+    # SAME source text must never touch it, even sitting right next to it.
+    fetch = FakeFetchProvider({"https://example.com/terms": _ok(_POSTMARK_SHAPED_TEXT)})
+    extractor = FakeExtractor(
+        _clean_tos().model_copy(update={
+            "prohibits_automation": True,
+            "evidence_snippets": [
+                "Access the Service by any means other than through the standard "
+                "industry-accepted or AC PM-approved application program interfaces;"
+            ],
+        })
+    )
+
+    result = await gate("example.com", discovery=DISCOVERED_OK, classify=CLASSIFIED_OK, fetch=fetch, extractor=extractor)
+
+    assert result.status == Status.HITL
+    assert result.reason_code == ReasonCode.TOS_PROHIBITS_AUTOMATION
+
+
 # --- D-057 regression guard: real vendor blocks must still fire ------------
 
 
