@@ -37,6 +37,8 @@ scripts/scratch_auth_required_verify.py
 scripts/scratch_nondeterminism_measure.py
 scripts/scratch_av_pinned_generation.py
 scripts/scratch_av_pinned_replay.py
+scripts/scratch_batch2_dryrun.py
+scripts/scratch_postmark_gate_detail.py
 scratch_batch_output/
 
 # personal interview prep, not a submitted deliverable -- kept on a
