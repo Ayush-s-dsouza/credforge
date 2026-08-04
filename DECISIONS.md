@@ -4404,3 +4404,65 @@ each vendor's real fetched docs text:
 field, nothing for a unit test to exercise beyond what D-068's existing
 tests already cover: this is a live-LLM-behavior fix, verified the only
 way it can be, against real docs text).
+
+### D-073: `evaluate_with_navigation_retry` -- a vendor's own page redirect shouldn't crash the generator
+
+**Found live, in the 10-vendor batch that validated D-070:** SendGrid's
+dry-run attempt didn't reach any of DISCOVER_SIGNUP's own reported
+outcomes -- it crashed with a raw Playwright exception, caught only by
+the top-level generic handler: `Error: Page.evaluate: Execution context
+was destroyed, most likely because of a navigation`. This is a real,
+well-understood Playwright failure mode, not a bug in this project's own
+logic: a `page.evaluate()` call and a page navigation raced, and the
+JavaScript execution context the call was targeting no longer existed by
+the time it ran. It surfaces most easily inside `wait_for_signup_form_ready`'s
+poll loop (D-069) -- 15 seconds is a wide window for a vendor's own
+client-side redirect (an anti-bot check, an onboarding flow, a legitimate
+router navigation) to fire mid-poll -- but any `page.evaluate()` call is
+exposed to it. Before this fix, that race produced the same generic
+"unexpected error during generation" outcome as any other unrelated crash,
+indistinguishable in a report from a real internal bug.
+
+**The fix: recognize this ONE specific, recoverable race, retry once,
+then fail distinctly if it persists.** `evaluate_with_navigation_retry(page,
+script)` (`playwright_browser.py`, exported alongside `wait_for_signup_form_ready`
+and `dismiss_cookie_banner` as shared browser-driving utilities) wraps
+`page.evaluate()`: on any OTHER error it re-raises immediately (this is
+deliberately narrow -- it does not swallow every possible Playwright
+failure, only this one, identified by matching "Execution context was
+destroyed" in the error text, the same string-matching-over-exception-type
+approach this file already uses elsewhere for cross-version Playwright
+error resilience). On a match, it waits for the new page to finish
+loading (`page.wait_for_load_state("load")`, capped at 5s, itself
+tolerant of failing) and retries the SAME evaluate exactly once. If the
+retry succeeds, the caller never even sees that anything happened. If the
+retry ALSO hits the same error, a new `PageNavigatedUnexpectedlyError` is
+raised -- not the raw Playwright exception, so callers can recognize this
+specific, now-genuinely-unrecoverable outcome without string-matching a
+second time themselves.
+
+**Wired into every `page.evaluate()` call site exposed to this race, not
+just the one that happened to crash first:** `wait_for_signup_form_ready`'s
+two evaluate calls (`playwright_browser.py`), `_reduce_dom`'s and
+`_gather_reveal_candidates`'s (`discover_signup.py`). `discover_signup()`'s
+top-level exception chain gained a dedicated `except
+PageNavigatedUnexpectedlyError` branch, ahead of the generic catch-all,
+producing a `PAGE_NAVIGATED_UNEXPECTEDLY:`-prefixed `stopped_reason` --
+the same distinct-prefix convention `SIGNUP_FORM_NOT_RENDERED:` (D-069)
+already established, so this failure mode is identifiable in logs/reports
+without inspecting the raw exception text. The replay path
+(`signup_and_create_app`) needed no separate wiring at all: it already
+calls `wait_for_signup_form_ready` internally, and its existing broad
+`except Exception` catch-all already turns any exception into
+`ProvisionOutcome.failure_reason` -- since `PageNavigatedUnexpectedlyError`'s
+own message is self-describing, that failure reads as a distinct outcome
+there too, for free.
+
+**Verified:** 318/318 tests pass (4 new, against a fake page object
+rather than a real Playwright one -- reproducing a genuine navigation
+race deterministically would mean timing a real redirect against a real
+`evaluate()` call, inherently flaky; the retry/error-classification logic
+itself is pure control flow, exactly what a fake `evaluate`/`wait_for_load_state`
+pair can exercise precisely: succeeds immediately with no error, retries
+once and recovers, raises the distinct error when the retry also fails,
+and propagates any UNRELATED error without retrying at all).

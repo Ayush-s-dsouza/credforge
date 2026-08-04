@@ -71,8 +71,10 @@ from ..providers.playwright_browser import (
     SIGNUP_FIRST_NAME,
     SIGNUP_FULL_NAME,
     SIGNUP_LAST_NAME,
+    PageNavigatedUnexpectedlyError,
     SignupRecipe,
     dismiss_cookie_banner,
+    evaluate_with_navigation_retry,
     wait_for_signup_form_ready,
 )
 from ..providers.signup_generation import (
@@ -425,7 +427,7 @@ def _build_selector(raw: dict) -> str:
 
 
 async def _reduce_dom(page) -> list[FormElement]:
-    raw_elements = await page.evaluate(_DOM_REDUCTION_JS)
+    raw_elements = await evaluate_with_navigation_retry(page, _DOM_REDUCTION_JS)
     elements: list[FormElement] = []
     for raw in raw_elements:
         elements.append(
@@ -510,7 +512,7 @@ def _build_reveal_selector(raw: dict) -> str:
 
 
 async def _gather_reveal_candidates(page) -> list[RevealCandidate]:
-    raw_elements = await page.evaluate(_REVEAL_CANDIDATE_JS)
+    raw_elements = await evaluate_with_navigation_retry(page, _REVEAL_CANDIDATE_JS)
     return [
         RevealCandidate(selector=_build_reveal_selector(raw), tag=raw["tag"], text=raw["text"], href=raw.get("href"))
         for raw in raw_elements
@@ -1075,6 +1077,17 @@ async def discover_signup(
             return DiscoverSignupResult(
                 identity_key=identity_key, dry_run=not live,
                 stopped_reason=f"hard stop: {exc.reason}" + (f" ({exc.evidence})" if exc.evidence else ""),
+            )
+        except PageNavigatedUnexpectedlyError as exc:
+            # Found live against SendGrid: a client-side redirect fired
+            # mid-poll and crashed the next DOM check. A vendor's own
+            # redirect shouldn't take the generator down -- this fires only
+            # after evaluate_with_navigation_retry's own settle-and-retry
+            # already failed once, so it's a genuine, distinct outcome, not
+            # folded into the generic catch-all below.
+            return DiscoverSignupResult(
+                identity_key=identity_key, dry_run=not live,
+                stopped_reason=f"PAGE_NAVIGATED_UNEXPECTEDLY: {exc}",
             )
         except Exception as exc:  # noqa: BLE001 -- an unexpected Playwright/page error is a real, reportable
             # finding, not a crash -- same "one exploration attempt's failure never takes down the caller"

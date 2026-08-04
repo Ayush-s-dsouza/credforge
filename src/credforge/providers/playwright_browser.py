@@ -135,6 +135,48 @@ _FORM_READY_CHECK_JS = """
 """
 
 
+class PageNavigatedUnexpectedlyError(Exception):
+    """A `page.evaluate()` call raised Playwright's "Execution context was
+    destroyed, most likely because of a navigation" error twice in a row --
+    once on the original attempt, once again after waiting for the page to
+    settle and retrying. Found live against SendGrid: a client-side
+    redirect fired during `wait_for_signup_form_ready`'s poll loop, and the
+    next scheduled DOM check crashed with this error rather than a normal
+    timeout. A vendor's own redirect shouldn't crash the generator, so a
+    single retry-after-settle is always attempted first (see
+    `evaluate_with_navigation_retry`) -- this exception means that retry
+    ALSO failed, a real, distinct outcome from either a normal timeout or
+    an unrelated crash, not silently folded into either."""
+
+
+async def evaluate_with_navigation_retry(page, script: str):
+    """Runs `page.evaluate(script)`, tolerating exactly one navigation
+    racing the call. On Playwright's "Execution context was destroyed"
+    error, waits for the new page to finish loading and retries the SAME
+    evaluate once; any other error, or a second failure of the same kind,
+    propagates (a second consecutive navigation-destroyed error raises
+    `PageNavigatedUnexpectedlyError` specifically, not the raw Playwright
+    error, so callers can recognize it without string-matching twice)."""
+    try:
+        return await page.evaluate(script)
+    except Exception as exc:
+        if "Execution context was destroyed" not in str(exc):
+            raise
+        try:
+            await page.wait_for_load_state("load", timeout=5_000)
+        except Exception:
+            pass
+        try:
+            return await page.evaluate(script)
+        except Exception as retry_exc:
+            if "Execution context was destroyed" not in str(retry_exc):
+                raise
+            raise PageNavigatedUnexpectedlyError(
+                f"page navigated unexpectedly while evaluating a DOM check, and retrying once after "
+                f"waiting for it to settle still failed: {retry_exc}"
+            ) from retry_exc
+
+
 async def wait_for_signup_form_ready(
     page, *, timeout_ms: int = FORM_READY_TIMEOUT_MS, poll_interval_ms: int = FORM_READY_POLL_INTERVAL_MS
 ) -> tuple[bool, bool]:
@@ -145,13 +187,13 @@ async def wait_for_signup_form_ready(
     with no fields." `required_waiting` is True whenever the field wasn't
     already present on the very first check -- callers use this to decide
     whether a generated recipe needs to repeat this same wait on replay."""
-    if await page.evaluate(_FORM_READY_CHECK_JS):
+    if await evaluate_with_navigation_retry(page, _FORM_READY_CHECK_JS):
         return True, False
     elapsed_ms = 0
     while elapsed_ms < timeout_ms:
         await page.wait_for_timeout(poll_interval_ms)
         elapsed_ms += poll_interval_ms
-        if await page.evaluate(_FORM_READY_CHECK_JS):
+        if await evaluate_with_navigation_retry(page, _FORM_READY_CHECK_JS):
             return True, True
     return False, True
 
