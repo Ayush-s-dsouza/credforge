@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -14,12 +15,31 @@ from credforge.pipeline.discover_signup import (
     _check_structural_payment_fields,
     _describe_intended_fills,
     _extract_anchored_value,
+    _locate_signup_page,
     load_generated_recipes,
     merge_recipes,
     save_generated_recipe,
 )
+from credforge.providers.fetch import FetchException, FetchError, FetchResult
 from credforge.providers.playwright_browser import SignupRecipe
 from credforge.providers.signup_generation import ClassifiedField, FormElement, SignupFormClassification
+
+
+class _FakeFetchProvider:
+    def __init__(self, responses: dict[str, FetchResult]) -> None:
+        self._responses = responses
+
+    async def fetch(self, url: str, *, method: str = "GET", headers=None) -> FetchResult:
+        if url not in self._responses:
+            raise FetchException(FetchError(url=url, reason="connection_error"))
+        return self._responses[url]
+
+
+def _fetch_ok(url: str, text: str) -> FetchResult:
+    return FetchResult(
+        url=url, final_url=url, status_code=200, content_type="text/html",
+        text=text, fetched_at=datetime.now(timezone.utc),
+    )
 
 
 def _element(**overrides) -> FormElement:
@@ -196,6 +216,73 @@ def test_extract_anchored_value_strips_trailing_comma_too() -> None:
     pattern = _build_anchored_regex("token:")
     value = _extract_anchored_value(pattern, "your token: abc123XYZ, please store it safely")
     assert value == "abc123XYZ"
+
+
+# --- _locate_signup_page: gathers ordered, deduped candidates across all --
+# tiers (D-071) -- it no longer decides which one is "the" signup page,
+# just what's reachable and in what priority order. Browser-based
+# verification (_verify_candidates_in_browser, not unit-tested here since
+# it drives a real Playwright page) decides acceptance.
+
+
+@pytest.mark.asyncio
+async def test_locate_signup_page_returns_developer_portal_url_first_when_reachable() -> None:
+    fetch = _FakeFetchProvider({"https://example.com/docs": _fetch_ok("https://example.com/docs", "x" * 300)})
+    candidates = await _locate_signup_page(
+        "example.com", developer_portal_url="https://example.com/docs", docs_url=None, docs_html=None, fetch=fetch,
+    )
+    assert candidates[0] == ("https://example.com/docs", "developer_portal_url")
+
+
+@pytest.mark.asyncio
+async def test_locate_signup_page_still_gathers_link_discovery_candidates_even_when_developer_portal_url_works() -> None:
+    # D-071: the old code returned the FIRST fetchable developer_portal_url
+    # and NEVER even tried the other tiers -- exactly the bug that broke
+    # Finnhub/CoinGecko live (developer_portal_url pointed at a docs/SDK
+    # reference page, not the real /signup form, and nothing else was ever
+    # tried). Now every reachable tier is gathered, in order, so a
+    # browser-render check downstream can fall through past a wrong guess.
+    fetch = _FakeFetchProvider({
+        "https://example.com/docs": _fetch_ok("https://example.com/docs", "x" * 300),
+        "https://example.com/signup": _fetch_ok("https://example.com/signup", "y" * 300),
+    })
+    candidates = await _locate_signup_page(
+        "example.com", developer_portal_url="https://example.com/docs", docs_url="https://example.com/docs",
+        docs_html='<a href="https://example.com/signup">Sign up</a>', fetch=fetch,
+    )
+    assert ("https://example.com/docs", "developer_portal_url") in candidates
+    assert ("https://example.com/signup", "link_discovery") in candidates
+    devportal_idx = candidates.index(("https://example.com/docs", "developer_portal_url"))
+    link_idx = candidates.index(("https://example.com/signup", "link_discovery"))
+    assert devportal_idx < link_idx
+
+
+@pytest.mark.asyncio
+async def test_locate_signup_page_falls_back_to_guess_list_when_nothing_else_found() -> None:
+    fetch = _FakeFetchProvider({"https://example.com/signup": _fetch_ok("https://example.com/signup", "z" * 300)})
+    candidates = await _locate_signup_page(
+        "example.com", developer_portal_url=None, docs_url=None, docs_html=None, fetch=fetch,
+    )
+    assert ("https://example.com/signup", "guess_list") in candidates
+
+
+@pytest.mark.asyncio
+async def test_locate_signup_page_dedupes_the_same_url_reached_via_multiple_tiers() -> None:
+    url = "https://example.com/signup"
+    fetch = _FakeFetchProvider({url: _fetch_ok(url, "w" * 300)})
+    candidates = await _locate_signup_page(
+        "example.com", developer_portal_url=url, docs_url=url, docs_html=f'<a href="{url}">Sign up</a>', fetch=fetch,
+    )
+    assert [u for u, _ in candidates].count(url) == 1
+
+
+@pytest.mark.asyncio
+async def test_locate_signup_page_returns_empty_list_when_nothing_is_reachable() -> None:
+    fetch = _FakeFetchProvider({})
+    candidates = await _locate_signup_page(
+        "example.com", developer_portal_url=None, docs_url=None, docs_html=None, fetch=fetch,
+    )
+    assert candidates == []
 
 
 # --- recipe emission from a classification -------------------------------

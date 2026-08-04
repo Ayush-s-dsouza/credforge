@@ -48,6 +48,7 @@ Trigger and safety rails (all non-negotiable, per DECISIONS.md D-065):
     ordering `provision.py` already uses.
 """
 
+import logging
 import re
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -89,6 +90,8 @@ from ..vault.secret_ref import make_vault_ref
 from .orchestrator import run_app, settings_fingerprint
 from .validate import validate
 
+logger = logging.getLogger("credforge.discover_signup")
+
 # A form classification this uncertain isn't worth acting on -- high on
 # purpose, since the next step is submitting a real form to a real vendor.
 _FORM_CLASSIFICATION_CONFIDENCE_THRESHOLD = 0.75
@@ -118,6 +121,11 @@ class DiscoverSignupResult(BaseModel):
     stopped_reason: str | None = None
 
     signup_url: str | None = None
+    # D-071: which tier of _locate_signup_page's candidate list actually
+    # verified in the browser -- "developer_portal_url" | "link_discovery"
+    # | "guess_list". Surfaced here for the same reason reveal_click_selector
+    # is: so which path won is visible on the result itself, not just in logs.
+    signup_page_source: str | None = None
     field_map: list[ClassifiedField] = Field(default_factory=list)
     # Dry-run only: selector -> the value that WOULD be filled if this were live.
     intended_fills: dict[str, str] = Field(default_factory=dict)
@@ -250,23 +258,49 @@ async def _locate_signup_page(
     docs_url: str | None,
     docs_html: str | None,
     fetch: FetchProvider,
-) -> tuple[str, str] | None:
+) -> list[tuple[str, str]]:
+    """Gathers every REACHABLE candidate signup-page URL, in tier order
+    (`developer_portal_url` first, then real anchor-link discovery, then
+    the guess-list fallback) -- but does NOT decide which one actually has
+    a real signup form on it. See DECISIONS.md D-071: the previous version
+    returned the FIRST fetchable `developer_portal_url` unconditionally,
+    trusting a plain HTTP fetch's mere reachability as proof it was the
+    right page. Found live: Alpha Vantage's real `developer_portal_url` is
+    its support page (`/support/#api-key` -- correct, as it happens, but
+    only by luck), while Finnhub's and CoinGecko's were docs/SDK reference
+    pages, not their real `/signup` forms -- DISCOVER_SIGNUP never even
+    tried the other tiers. A plain fetch can only confirm a candidate is a
+    live, real page (not a 404, not empty) -- it can't confirm a form
+    exists on it, since a real signup form is very often entirely
+    JS-rendered (D-066's shell-detection lesson, again) and invisible to a
+    fetch no matter how reachable the URL is. That confirmation now happens
+    downstream, against a REAL browser, in `_verify_candidates_in_browser`,
+    trying each candidate this function returns in order until one
+    actually shows a real field."""
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _record(url: str, tier: str) -> None:
+        if url not in seen:
+            seen.add(url)
+            candidates.append((url, tier))
+
     if developer_portal_url:
         found = await _fetch_usable_page(developer_portal_url, fetch=fetch)
         if found is not None:
-            return found
+            _record(found[0], "developer_portal_url")
 
-    candidate_urls: list[str] = []
-    seen: set[str] = set()
+    link_urls: list[str] = []
+    link_seen: set[str] = set()
 
-    def _add(html_text: str, *, base_url: str) -> None:
+    def _add_links(html_text: str, *, base_url: str) -> None:
         for url in _extract_signup_candidate_links(html_text, base_url=base_url, vendor_domain=identity_key):
-            if url not in seen:
-                seen.add(url)
-                candidate_urls.append(url)
+            if url not in link_seen:
+                link_seen.add(url)
+                link_urls.append(url)
 
     if docs_html and docs_url:
-        _add(docs_html, base_url=docs_url)
+        _add_links(docs_html, base_url=docs_url)
 
     homepage_url = f"https://{identity_key}"
     try:
@@ -274,18 +308,55 @@ async def _locate_signup_page(
     except FetchException:
         homepage = None
     if homepage is not None and 200 <= homepage.status_code < 300 and homepage.text:
-        _add(homepage.text, base_url=homepage.final_url or homepage_url)
+        _add_links(homepage.text, base_url=homepage.final_url or homepage_url)
 
-    for url in candidate_urls:
+    for url in link_urls:
         found = await _fetch_usable_page(url, fetch=fetch)
         if found is not None:
-            return found
+            _record(found[0], "link_discovery")
 
-    # Fallback: link discovery found no candidates, or none panned out.
     for path in _SIGNUP_PATH_GUESSES:
         found = await _fetch_usable_page(f"https://{identity_key}{path}", fetch=fetch)
         if found is not None:
-            return found
+            _record(found[0], "guess_list")
+
+    return candidates
+
+
+async def _verify_candidates_in_browser(
+    page, candidates: list[tuple[str, str]], *, analyzer: SignupFormAnalyzer, identity_key: str
+) -> tuple[str, str, bool, list[str]] | None:
+    """Tries each `_locate_signup_page` candidate against a REAL browser, in
+    the order given -- the actual acceptance test, not a keyword match on
+    the URL or a raw-HTML regex, using the exact same generic readiness
+    check (`wait_for_signup_form_ready`, plus a reveal-click attempt on
+    timeout) already trusted downstream to tell a real form apart from page
+    chrome. Falls through to the next candidate whenever the current one
+    doesn't verify -- never trusts the first merely-reachable URL. Returns
+    (accepted_url, source_tier, required_waiting, reveal_clicks) for the
+    first candidate that shows a real field, or None if none of them ever
+    did."""
+    for url, tier in candidates:
+        try:
+            await page.goto(url)
+        except Exception as exc:
+            logger.info(
+                "signup-page candidate unreachable in browser",
+                extra={"identity_key": identity_key, "url": url, "source_tier": tier, "error": str(exc)},
+            )
+            continue
+        await dismiss_cookie_banner(page)
+        form_ready, waited = await wait_for_signup_form_ready(page)
+        reveal_clicks: list[str] = []
+        if not form_ready:
+            form_ready, reveal_clicks, waited_after_click = await _reveal_signup_form(page, analyzer=analyzer, url=url)
+            waited = waited or waited_after_click
+        logger.info(
+            "signup-page candidate accepted" if form_ready else "signup-page candidate rejected",
+            extra={"identity_key": identity_key, "url": url, "source_tier": tier, "accepted": form_ready},
+        )
+        if form_ready:
+            return url, tier, waited, reveal_clicks
     return None
 
 
@@ -791,19 +862,19 @@ async def discover_signup(
     docs_url = state.discovery.docs_url if state.discovery else None
     docs_html = state.discovery.docs_text if state.discovery else None
 
-    located = await _locate_signup_page(
+    candidates = await _locate_signup_page(
         identity_key, developer_portal_url=developer_portal_url, docs_url=docs_url, docs_html=docs_html,
         fetch=providers.fetch,
     )
-    if located is None:
+    if not candidates:
         return DiscoverSignupResult(
             identity_key=identity_key, dry_run=not live,
             stopped_reason=(
-                "could not locate a real signup page -- developer_portal_url was absent or unreachable, "
-                "and no signup-shaped link was found on the docs page or homepage"
+                "could not locate any reachable candidate signup page -- developer_portal_url was "
+                "absent or unreachable, and no signup-shaped link was found on the docs page, "
+                "homepage, or the guess-list fallback paths"
             ),
         )
-    signup_url, _signup_page_text = located
 
     if not settings.anthropic_api_key:
         raise RuntimeError(
@@ -821,49 +892,36 @@ async def discover_signup(
         browser = await p.chromium.launch(headless=not headed)
         try:
             page = await browser.new_page()
-            await page.goto(signup_url)
-            await dismiss_cookie_banner(page)
 
-            # D-069: wait for a real, visible, non-search form field to
-            # appear before ever reducing the DOM -- found live against
-            # NASA, whose signup form is injected asynchronously by a
-            # third-party embed script. Without this, a fixed-delay
-            # snapshot only sees page chrome (nav, search, category
-            # filters), and the classifier -- correctly, given what it was
-            # shown -- reports near-zero confidence on a form that simply
-            # hadn't rendered yet, indistinguishable from a page that
-            # genuinely has no real form at all.
-            form_ready, required_waiting = await wait_for_signup_form_ready(page)
-
-            # D-070: the plain wait wasn't the whole story -- some widgets
-            # (NASA's) don't render on any timer at all, only on a click.
-            # Only tried once the passive wait has already failed, never
-            # pre-emptively, since most vendors' forms need no interaction.
-            reveal_clicks: list[str] = []
-            if not form_ready:
-                form_ready, reveal_clicks, waited_after_click = await _reveal_signup_form(
-                    page, analyzer=analyzer, url=signup_url
-                )
-                required_waiting = required_waiting or waited_after_click
-
-            if not form_ready:
-                elements_found = await _reduce_dom(page)
-                reveal_note = f", even after clicking {reveal_clicks}" if reveal_clicks else ""
+            # D-071: verify each candidate against a REAL browser render --
+            # a plain fetch's mere reachability was never proof a candidate
+            # actually had a signup form on it (found live: Finnhub's and
+            # CoinGecko's developer_portal_url pointed at a docs/SDK
+            # reference page, not their real /signup form, and the old code
+            # trusted it unconditionally). Falls through developer_portal_url
+            # -> link_discovery -> guess_list, verifying each with the same
+            # readiness+reveal check (D-069/D-070) already trusted downstream
+            # to tell a real form apart from page chrome.
+            accepted = await _verify_candidates_in_browser(
+                page, candidates, analyzer=analyzer, identity_key=identity_key
+            )
+            if accepted is None:
+                displayed = ", ".join(f"{u!r} [{t}]" for u, t in candidates[:10])
+                more = ", ..." if len(candidates) > 10 else ""
                 return DiscoverSignupResult(
-                    identity_key=identity_key, dry_run=not live, signup_url=signup_url,
+                    identity_key=identity_key, dry_run=not live,
                     stopped_reason=(
-                        f"SIGNUP_FORM_NOT_RENDERED: no visible text/email/password field appeared "
-                        f"within {FORM_READY_TIMEOUT_MS / 1000:.0f}s of loading {signup_url!r}{reveal_note} -- "
-                        f"{len(elements_found)} other element(s) found "
-                        f"({', '.join(el.tag for el in elements_found[:10])}"
-                        f"{', ...' if len(elements_found) > 10 else ''}), none of them a real form field. "
-                        "This is a distinct outcome from a low-confidence classification: the page may "
-                        "render its form asynchronously and need longer, or this genuinely isn't a "
-                        "signup page."
+                        f"SIGNUP_FORM_NOT_RENDERED: tried {len(candidates)} candidate signup page(s), "
+                        f"each waiting up to {FORM_READY_TIMEOUT_MS / 1000:.0f}s and attempting a reveal "
+                        f"click before moving on, ({displayed}{more}) -- none ever showed a real "
+                        "text/email/password form field. This is a distinct outcome from a low-confidence "
+                        "classification: every reachable candidate was tried against a real render, not "
+                        "just the first one."
                     ),
                 )
-
+            signup_url, signup_page_source, required_waiting, reveal_clicks = accepted
             reveal_click_selector = reveal_clicks[-1] if reveal_clicks else None
+
             elements = await _reduce_dom(page)
 
             _check_structural_payment_fields(elements)
@@ -881,6 +939,7 @@ async def discover_signup(
             if not live:
                 return DiscoverSignupResult(
                     identity_key=identity_key, dry_run=True, signup_url=signup_url,
+                    signup_page_source=signup_page_source,
                     field_map=classification.field_map,
                     intended_fills=_describe_intended_fills(classification, email_alias=email_alias),
                     required_checkboxes=list(classification.required_checkboxes),

@@ -4272,3 +4272,85 @@ NASA, and the ten-vendor batch the user specified to validate this
 generalizes beyond the one vendor that motivated it, is reported
 separately once run -- per the user's explicit instruction not to
 overfit a general mechanism to n=1.
+
+### D-071: `_locate_signup_page` verifies candidates against a real browser render instead of trusting the first fetchable URL
+
+**Found live, by running D-070's own validation batch, not designed
+speculatively:** the 10-vendor dry-run batch built to validate the reveal
+mechanism beyond NASA surfaced a different, upstream bug instead. Finnhub
+and CoinGecko both reached `SIGNUP_FORM_NOT_RENDERED` -- but a direct
+follow-up check showed why: calling `_locate_signup_page` standalone with
+no context args (forcing it through link-discovery and the guess-list
+fallback) correctly found `finnhub.io/signup`. The REAL pipeline run never
+tried that path at all, because DISCOVER's own extraction had already
+populated `developer_portal_url` with `finnhub.io/docs/api` (a plausible
+"developer portal" in a loose sense, but a docs/API-reference page, not a
+signup form), and the old `_locate_signup_page`'s very first check --
+`if developer_portal_url: return _fetch_usable_page(developer_portal_url)`
+-- accepted it unconditionally and returned immediately, never even
+attempting link-discovery or the guess-list. `_fetch_usable_page`'s own
+checks (2xx status, real content, not a soft-404) only prove a URL is a
+*real, live page* -- they say nothing about whether a signup form actually
+exists on it. The user independently confirmed the same root cause before
+this diagnosis was reported back: Alpha Vantage's `developer_portal_url`
+is `/support/#api-key`, a support page, and it happened to also be the
+real signup form only by luck (per the hand-written recipe's own D-064
+comment) -- the exact same unconditional-trust bug, one call away from
+also breaking the positive-control vendor picked specifically because it
+was supposed to be the easy case.
+
+**The fix: acceptance moves from a fetch-based heuristic to the same
+real-browser check already trusted downstream.** `_locate_signup_page`
+is now purely a candidate-GATHERING function -- it returns an ordered
+`list[(url, tier)]` across all three tiers (`developer_portal_url`,
+`link_discovery`, `guess_list`), deduped, with `_fetch_usable_page` still
+used per-candidate as a cheap reachability pre-filter (unreachable/soft-404
+URLs never even reach the browser). A new `_verify_candidates_in_browser`
+tries each candidate in order against a REAL Playwright page: navigate,
+dismiss the cookie banner, `wait_for_signup_form_ready` (D-069), and on
+timeout `_reveal_signup_form` (D-070) -- the exact same generic
+readiness+reveal check already trusted to tell a real form apart from page
+chrome everywhere else in this file. The first candidate that shows a
+real field wins; if none do, DISCOVER_SIGNUP falls through developer_portal_url
+-> link_discovery -> guess_list and only then reports
+`SIGNUP_FORM_NOT_RENDERED`, now listing every candidate actually tried.
+Explicitly NOT a static-HTML keyword/shape check (a `<input type=email>`
+regex over the raw fetched HTML) -- that would have re-broken NASA and
+every other JS-rendered widget this project has already fixed (D-066,
+D-069): a real signup form is very often invisible to a plain fetch no
+matter how reachable the URL is, so only an actual render can tell "no
+form here" apart from "form hasn't rendered yet."
+
+**Which tier won is now visible, not just inferred:** `logger =
+logging.getLogger("credforge.discover_signup")` logs each candidate's
+accept/reject outcome with its tier (the project's first use of the
+`logging` module in this file; matches the existing
+`logging.getLogger("credforge.report")` convention in `report.py`), and
+`DiscoverSignupResult.signup_page_source` surfaces the winning tier on the
+result itself, the same "decision visible on the result, not just in
+logs" precedent `reveal_click_selector` (D-070) already set.
+
+**A known, accepted limitation, not silently ignored:** reusing
+`wait_for_signup_form_ready` as the acceptance test means any visible,
+non-search text/email/password input on a candidate page passes -- a
+newsletter signup box in a docs page's footer, for instance, could
+false-positive as "this is the signup form." Not fixed further here: the
+existing downstream hard stops (`_check_llm_hard_stops` requires a field
+classified `email` AND a `submit_selector` AND confidence above threshold)
+are exactly the second, independent layer this project already relies on
+elsewhere (structural CAPTCHA/payment checks independent of the LLM's own
+`blockers` judgment) -- a false-accept here is expected to be caught one
+step later, not something this function alone has to get perfectly right.
+
+**Verified:** 314/314 tests pass (5 new: `developer_portal_url` still
+returned first when reachable; link-discovery and guess-list candidates
+are gathered even when `developer_portal_url` already succeeded --
+directly exercising the Finnhub/CoinGecko scenario; guess-list fallback
+still works with no other signal; cross-tier de-duplication; empty
+candidate list when nothing is reachable at all). `_verify_candidates_in_browser`
+itself is not unit-tested, matching this file's existing convention that
+browser-driving functions (`_reveal_signup_form`, the main
+`discover_signup` flow) are exercised live, not mocked. Live
+re-verification against Alpha Vantage, held for this fix per the user's
+explicit instruction ("Hold — I skipped the fixes and one blocks the
+Alpha Vantage test"), is reported separately once run.
