@@ -1065,6 +1065,7 @@ async def discover_signup(
 
             return DiscoverSignupResult(
                 identity_key=identity_key, dry_run=False, signup_url=signup_url,
+                signup_page_source=signup_page_source, reveal_click_selector=reveal_click_selector,
                 field_map=classification.field_map, submit_selector=classification.submit_selector,
                 required_checkboxes=list(classification.required_checkboxes),
                 credential_vault_ref=api_key_ref, recipe_path=str(recipe_path),
