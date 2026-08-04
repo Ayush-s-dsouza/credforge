@@ -34,6 +34,12 @@ class ResolveResult(BaseModel):
     reason_code: ReasonCode | None = None  # set only when resolved is False
     chosen: ResolveCandidate | None = None
     alternates: list[ResolveCandidate] = Field(default_factory=list)
+    # D-082: True when `chosen` was NOT the winner of RESOLVE's own scoring
+    # -- RESOLVE was ambiguous (top two candidates too close) and DISCOVER
+    # settled it instead, by actually reading each candidate's page until
+    # one verified as a real public API. False (the default) covers every
+    # other path, including a normal unambiguous resolve.
+    resolved_via_content_fallback: bool = False
 
 
 class DiscoveryResult(BaseModel):

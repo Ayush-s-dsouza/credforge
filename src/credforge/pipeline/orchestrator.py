@@ -19,19 +19,93 @@ from ..config import Settings
 from ..enums import PipelineStage, ReasonCode, Status, StageStatus
 from ..models.artifact import HandoffArtifact
 from ..models.registry_entities import RegistryEntry
-from ..models.state import AppPipelineState, ClassifyResult
+from ..models.state import AppPipelineState, ClassifyResult, DiscoveryResult, ResolveResult
 from ..providers.factory import ProviderBundle
+from ..providers.fetch import FetchProvider
+from ..providers.llm import Extractor
 from ..registry.identity import slugify, unresolved_identity_key
 from ..registry.store import AppendOnlyRegistry
 from ..vault.crypto_vault import FernetVault
 from .classify import classify
 from .discover import discover
 from .emit import build_artifact
-from .explain import NULL_EXPLAIN, ExplainSink
+from .explain import NULL_EXPLAIN, ExplainEvent, ExplainSink
 from .gate import gate
 from .provision import provision
 from .resolve import resolve
 from .validate import validate
+
+
+async def _resolve_ambiguity_via_content(
+    resolve_result: ResolveResult,
+    *,
+    identity_key: str,
+    fetch: FetchProvider,
+    extractor: Extractor,
+    explain: ExplainSink,
+) -> tuple[ResolveResult, DiscoveryResult | None]:
+    """D-082: RESOLVE_AMBIGUOUS used to be terminal -- a ranking heuristic
+    (the confidence-score gap between the top two candidates) stopping the
+    whole run before DISCOVER, a stage that can actually read a page's
+    content, ever got a chance to look. Tries each ambiguous candidate's
+    domain through DISCOVER, completely unchanged, in the exact order
+    RESOLVE ranked them (`alternates` is already that full ranked list --
+    see resolve.py) -- the first one whose docs page verifies as a real
+    public API wins, exactly the same "try in order, first real success
+    wins" pattern DISCOVER already uses internally for docs-URL
+    candidates (D-028), just applied one level up, across domains.
+
+    `docs_url_candidates=[]` for every trial: RESOLVE deliberately never
+    ranks/verifies docs URLs for an ambiguous candidate ("stop there
+    without even attempting docs-URL discovery on a candidate we're not
+    going to trust anyway" -- resolve.py's own docstring), so DISCOVER's
+    own conventional subdomain/path guesses (`_candidate_list`) are all
+    there is to try here, same as a bare, unverified domain always gets.
+
+    Returns the original, still-ambiguous ResolveResult unchanged (and
+    None) if no candidate's content ever panned out -- the caller's
+    existing `if not state.resolve.resolved` terminal-stop handles that
+    case exactly as it always has, no separate failure path needed here.
+    """
+    for candidate in resolve_result.alternates:
+        explain.emit(
+            ExplainEvent(
+                stage=PipelineStage.RESOLVE,
+                identity_key=candidate.domain,
+                message=f"ambiguous resolve: trying {candidate.domain} through DISCOVER -- content, not score, decides",
+            )
+        )
+        trial_discovery = await discover(
+            candidate.domain, docs_url_candidates=[], fetch=fetch, extractor=extractor, explain=explain,
+        )
+        if trial_discovery.extraction is not None and trial_discovery.extraction.has_public_api:
+            explain.emit(
+                ExplainEvent(
+                    stage=PipelineStage.RESOLVE,
+                    identity_key=candidate.domain,
+                    message=(
+                        f"resolved {candidate.domain} via content, not RESOLVE's score -- RESOLVE was "
+                        f"ambiguous ({', '.join(f'{c.domain} ({c.confidence})' for c in resolve_result.alternates)}); "
+                        f"{candidate.domain} was the first candidate whose docs page verified as a real public API"
+                    ),
+                )
+            )
+            resolved = resolve_result.model_copy(
+                update={"resolved": True, "reason_code": None, "chosen": candidate, "resolved_via_content_fallback": True}
+            )
+            return resolved, trial_discovery
+
+    explain.emit(
+        ExplainEvent(
+            stage=PipelineStage.RESOLVE,
+            identity_key=identity_key,
+            message=(
+                f"none of {len(resolve_result.alternates)} ambiguous candidate(s)' docs pages verified as "
+                "a real public API -- still ambiguous, not guessing"
+            ),
+        )
+    )
+    return resolve_result, None
 
 
 def settings_fingerprint(settings: Settings, *, live: bool) -> str:
@@ -72,6 +146,21 @@ async def run_app(
         confidence_threshold=settings.resolve_confidence_threshold,
         explain=explain,
     )
+
+    # D-082: RESOLVE_AMBIGUOUS alone doesn't stop the run anymore -- give
+    # DISCOVER a chance to settle it by content before falling back to the
+    # terminal HITL path below. resolve_not_found/malformed_input/
+    # low_confidence are untouched -- there's nothing to try for those
+    # (no candidate list, or a single already-considered one).
+    if not state.resolve.resolved and state.resolve.reason_code == ReasonCode.RESOLVE_AMBIGUOUS:
+        state.resolve, state.discovery = await _resolve_ambiguity_via_content(
+            state.resolve,
+            identity_key=state.identity_key,
+            fetch=providers.fetch,
+            extractor=providers.extractor,
+            explain=explain,
+        )
+
     if not state.resolve.resolved:
         # A RESOLVE that never produced a confident single answer is a
         # terminal outcome, not a stage that "didn't finish" -- it gets a
@@ -85,13 +174,17 @@ async def run_app(
         return state, artifact
     state.identity_key = state.resolve.chosen.domain
 
-    state.discovery = await discover(
-        state.identity_key,
-        docs_url_candidates=state.resolve.chosen.docs_url_candidates,
-        fetch=providers.fetch,
-        extractor=providers.extractor,
-        explain=explain,
-    )
+    if state.discovery is None:
+        # Already set above when the content-fallback found its winner --
+        # that trial run IS this app's real DISCOVER result, not just a
+        # probe to be thrown away and redone.
+        state.discovery = await discover(
+            state.identity_key,
+            docs_url_candidates=state.resolve.chosen.docs_url_candidates,
+            fetch=providers.fetch,
+            extractor=providers.extractor,
+            explain=explain,
+        )
 
     if state.discovery.reason_code == ReasonCode.DISCOVERY_FAILED:
         # DISCOVERY_FAILED still flows into GATE, not around it -- gate()

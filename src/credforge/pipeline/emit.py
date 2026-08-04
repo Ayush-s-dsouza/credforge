@@ -136,6 +136,32 @@ def _build_from_gate(state: AppPipelineState, *, credforge_version: str) -> Hand
                 snippet=state.resolve.chosen.evidence_snippet,
             )
         )
+        # D-082: identity was decided by DISCOVER actually reading the
+        # page, not by RESOLVE's own ranking -- RESOLVE was ambiguous.
+        # Every candidate RESOLVE considered is recorded here too, same
+        # as the terminal-ambiguous path already does, so a consumer of
+        # this artifact can see what was ruled out and why the winner
+        # wasn't simply "the top score."
+        if state.resolve.resolved_via_content_fallback:
+            evidence.append(
+                EvidenceItem(
+                    claim=(
+                        f"{state.resolve.chosen.domain} was chosen by content, not score -- RESOLVE's own "
+                        "ranking was ambiguous (top candidates too close); DISCOVER settled it by actually "
+                        "reading each candidate's page until one verified as a real public API"
+                    ),
+                    source_url=state.resolve.chosen.evidence_url,
+                    snippet=state.resolve.chosen.evidence_snippet,
+                )
+            )
+            evidence.extend(
+                EvidenceItem(
+                    claim=f"ambiguous candidate considered: {alt.domain} (RESOLVE confidence {alt.confidence:.2f})",
+                    source_url=alt.evidence_url,
+                    snippet=alt.evidence_snippet,
+                )
+                for alt in state.resolve.alternates
+            )
     # D-054: this evidence item now reads DISCOVER's source_tier_reason --
     # computed once, from the same docs_url that ends up in `api.docs_url`
     # and `api.source_tier` above -- instead of RESOLVE's

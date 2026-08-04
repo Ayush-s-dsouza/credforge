@@ -265,6 +265,102 @@ async def test_recipe_pinned_identity_can_still_land_hitl_gate_verdict_remains_b
     assert state.provision is None
 
 
+# --- D-082: RESOLVE_AMBIGUOUS no longer terminates the run on its own -----
+# -- DISCOVER gets a chance to settle it by content first.
+
+_AMBIGUOUS_RESULTS = [
+    # Confidences land ~0.90 (foo.com) vs ~0.83 (fooo.com) -- a 0.071 gap,
+    # inside AMBIGUITY_MARGIN (0.15), so resolve() reports RESOLVE_AMBIGUOUS
+    # with both as alternates, foo.com ranked first (the higher score).
+    SearchResult(title="Foo", url="https://foo.com/", snippet="Foo Inc.", rank=1),
+    SearchResult(title="Fooo", url="https://fooo.com/", snippet="Fooo Inc.", rank=1),
+]
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_resolve_lets_discover_decide_by_content_not_score(tmp_path: Path) -> None:
+    # foo.com scores HIGHER than fooo.com, but only fooo.com has a real,
+    # readable docs page -- every fetch to foo.com or its conventional
+    # guesses fails. The winner must be fooo.com, proving content decided
+    # it, not RESOLVE's own ranking.
+    fetch = FakeFetch({"https://docs.fooo.com": LONG_TEXT})
+    providers = ProviderBundle(
+        search=FakeSearch(_AMBIGUOUS_RESULTS), fetch=fetch, extractor=FakeExtractor(),
+        email=MockEmailProvider(), browser=MockBrowserDriver(),
+    )
+    registry = AppendOnlyRegistry(tmp_path / "registry.jsonl")
+
+    state, artifact = await run_app(
+        "Foo", providers=providers, settings=Settings(), registry=registry,
+        run_id="run_1", data_dir=tmp_path, dry_run=True,
+    )
+
+    assert state.resolve.resolved is True
+    assert state.resolve.chosen.domain == "fooo.com"
+    assert state.resolve.resolved_via_content_fallback is True
+    assert state.identity_key == "fooo.com"
+    assert state.discovery is not None
+    assert state.discovery.extraction is not None and state.discovery.extraction.has_public_api is True
+
+    assert artifact is not None
+    assert artifact.status.value == "AUTO"
+    claims = [e.claim for e in artifact.evidence]
+    assert any("chosen by content, not score" in c for c in claims)
+    assert any("ambiguous candidate considered: foo.com" in c for c in claims)
+    assert any("ambiguous candidate considered: fooo.com" in c for c in claims)
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_resolve_stays_hitl_when_no_candidate_content_verifies(tmp_path: Path) -> None:
+    # Neither foo.com nor fooo.com (nor any of their conventional docs
+    # guesses) is fetchable -- the content fallback tries both, both fail,
+    # and the run must land exactly where it always did: RESOLVE_AMBIGUOUS,
+    # HITL, no guessing.
+    providers = ProviderBundle(
+        search=FakeSearch(_AMBIGUOUS_RESULTS), fetch=FakeFetch({}), extractor=FakeExtractor(),
+        email=MockEmailProvider(), browser=MockBrowserDriver(),
+    )
+    registry = AppendOnlyRegistry(tmp_path / "registry.jsonl")
+
+    state, artifact = await run_app(
+        "Foo", providers=providers, settings=Settings(), registry=registry,
+        run_id="run_1", data_dir=tmp_path, dry_run=True,
+    )
+
+    assert state.resolve.resolved is False
+    assert state.resolve.reason_code.value == "resolve_ambiguous"
+    assert state.resolve.resolved_via_content_fallback is False
+    assert state.gate is None  # GATE genuinely never ran
+
+    assert artifact is not None
+    assert artifact.status.value == "HITL"
+    assert artifact.reason_code.value == "resolve_ambiguous"
+    # The candidate list is still in the artifact even though nothing panned out.
+    claims = [e.claim for e in artifact.evidence]
+    assert any("foo.com" in c for c in claims)
+    assert any("fooo.com" in c for c in claims)
+
+
+@pytest.mark.asyncio
+async def test_resolve_not_found_never_attempts_the_content_fallback(tmp_path: Path) -> None:
+    # D-082 must not touch RESOLVE_NOT_FOUND -- there's no candidate list
+    # to try. Same fixture test_resolve_failure_... above already uses,
+    # asserted here specifically against the new field so a future change
+    # that accidentally widens the fallback's trigger condition is caught.
+    providers = _providers(resolvable=False)
+    registry = AppendOnlyRegistry(tmp_path / "registry.jsonl")
+
+    state, artifact = await run_app(
+        "NoSuchApp", providers=providers, settings=Settings(), registry=registry,
+        run_id="run_1", data_dir=tmp_path, dry_run=True,
+    )
+
+    assert state.resolve.resolved is False
+    assert state.resolve.reason_code.value == "resolve_not_found"
+    assert state.resolve.resolved_via_content_fallback is False
+    assert state.discovery is None  # DISCOVER was never even attempted
+
+
 @pytest.mark.asyncio
 async def test_a_batch_of_n_apps_always_produces_n_artifacts(tmp_path: Path) -> None:
     # The property the user asked to have tested directly: no app is ever

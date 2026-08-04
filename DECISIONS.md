@@ -5078,3 +5078,63 @@ prohibition sentence in the same source_text (the strongest form of the
 regression) and asserts HITL/`TOS_PROHIBITS_AUTOMATION` is unchanged.
 The existing Etsy regression test (D-057, `prohibits_automation`, an
 unrelated flag) also re-run unaffected. 339/339 total (2 new).
+
+### D-082: RESOLVE_AMBIGUOUS no longer terminates the run on its own -- DISCOVER settles it by content
+
+**The gap:** the user's own investigation into why the deployed site
+resolved TheCatAPI differently from a local run (0.95 local vs.
+RESOLVE_AMBIGUOUS deployed, 0.575 vs. 0.4793 against a lookalike
+"thatapicompany.com") led to setting BRAVE_API_KEY aside -- both
+environments were already on DDG, so that wasn't the actual variable --
+and instead re-diagnosing the real problem: RESOLVE's own ambiguity
+check was terminating the run before DISCOVER, a stage that can actually
+fetch and read a page, ever got a chance to break the tie.
+
+**The fix, deliberately the smallest version of this:** `resolve()`
+itself is completely untouched -- same scoring, same `AMBIGUITY_MARGIN`,
+same `RESOLVE_AMBIGUOUS` reason code, same ranked `alternates` list it
+already produced. A new orchestrator-level helper,
+`_resolve_ambiguity_via_content` (`pipeline/orchestrator.py`), only runs
+when `resolve()` returns unresolved with `reason_code ==
+RESOLVE_AMBIGUOUS`. It tries each ambiguous candidate's domain through
+`discover()` -- completely unchanged, `docs_url_candidates=[]` since an
+ambiguous candidate was never docs-URL-verified by RESOLVE in the first
+place, so DISCOVER's own conventional subdomain/path guesses are what
+run -- in the exact order RESOLVE ranked them, and the first candidate
+whose docs page verifies `has_public_api=True` wins. This is the same
+"try in order, first real success wins" pattern DISCOVER already uses
+internally for docs-URL candidates within one domain (D-028), just
+applied one level up, across domains that RESOLVE couldn't rank
+confidently apart. If every candidate's content fails to verify, the
+original, still-ambiguous `ResolveResult` is returned unchanged and the
+orchestrator's existing terminal-stop path (`if not
+state.resolve.resolved`) handles it exactly as it always has -- no new
+failure path, no special-casing. `RESOLVE_NOT_FOUND` (and every other
+unresolved reason) never enters this branch at all -- there's no
+candidate list to try.
+
+**New field, `ResolveResult.resolved_via_content_fallback: bool`** --
+True only when a winner came from this path, so the fact is queryable on
+the state object itself, not just inferable from log lines. `emit.py`
+reads it: when set, the artifact's evidence gains an explicit claim
+("chosen by content, not score -- RESOLVE's own ranking was ambiguous")
+plus one "ambiguous candidate considered" entry per alternate RESOLVE
+had ranked -- the full candidate list stays visible in the artifact
+whether the fallback succeeds or ultimately still fails (the failure
+path already had this via `_build_from_failed_resolve`; this closes the
+gap for the success-via-fallback path specifically).
+
+**Verified via the real orchestrator, not resolve() in isolation** (3
+new tests, `test_orchestrator.py`): a genuinely ambiguous pair
+(`foo.com` confidence ~0.90 vs. `fooo.com` ~0.83, a 0.071 gap, both
+above the plausibility floor) where only the LOWER-scored candidate
+(`fooo.com`) has a real, fetchable docs page -- proves the winner is
+determined by content, not rank, since the higher-scored candidate's
+total unreachability is what should have made it lose regardless of
+score.  A second test where neither candidate's content ever verifies
+confirms the run still lands exactly on `RESOLVE_AMBIGUOUS`/HITL, with
+both candidates still visible in the artifact evidence. A third
+regression-guards `RESOLVE_NOT_FOUND` specifically:
+`resolved_via_content_fallback` stays False and `state.discovery` stays
+`None` -- the fallback genuinely never runs for it. 342/342 total (3
+new). Seed-batch impact (all 20 apps, live) reported separately below.
